@@ -1,0 +1,55 @@
+# This repo is spec-only. The implementation (src/, configs, scripts)
+# is regenerated from spec/ by a coding agent and intentionally
+# excluded from version control.
+
+# --- generated implementation ---
+/src/
+/public/
+/scripts/
+
+# --- generated configs ---
+/package.json
+/package-lock.json
+/pnpm-lock.yaml
+/yarn.lock
+/tsconfig.json
+/tsconfig.*.json
+/vite.config.ts
+/vite.config.mjs
+/vite.config.js
+/tailwind.config.ts
+/tailwind.config.js
+/postcss.config.cjs
+/postcss.config.js
+/index.html
+
+# --- build / install artefacts ---
+/node_modules/
+/dist/
+/.vite/
+/coverage/
+/.next/
+/.cache/
+
+# --- env / secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- logs ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
