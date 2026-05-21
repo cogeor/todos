@@ -133,9 +133,9 @@ The spec is small and lives in `spec/`. Edit the Markdown to taste —
 add a field, change the palette, add a tab — and re-run your agent
 with the new spec.
 
-Before adding scope, read [`spec/REVIEW.md`](./spec/REVIEW.md): a
-memento of failure modes from an earlier over-spec'd draft. Specs
-drift fast.
+Before adding scope, read
+[`spec/_authoring/REVIEW.md`](./spec/_authoring/REVIEW.md): a memento
+of failure modes from an earlier over-spec'd draft. Specs drift fast.
 
 ---
 
@@ -144,11 +144,11 @@ drift fast.
 ```
 spec/
   README.md                  core user story, success criteria, architecture
-  REVIEW.md                  failure modes a spec should catch
   domain/README.md           types + validation (one entity, one rule)
   data/README.md             Dexie + repository (one table)
   frontend/README.md         one screen, grey + white palette, PWA
   infrastructure/README.md   build, serve:phone, smoke
+  _authoring/REVIEW.md       optional: failure modes a spec should catch
 user_flow.md                 phone install flow with QR
 README.md                    this file
 .gitignore

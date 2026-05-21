@@ -55,8 +55,8 @@ No router. No providers. No context. There is one screen.
 
 ```
 ┌──────────────────────────────────────────┐
-│  Todos                                   │
-│                                          │
+│  Todos                          [Install]│ ← Install shown only when
+│                                          │   beforeinstallprompt has fired
 │  [+ Add]                                 │
 │                                          │
 │  ┌────────────────────────────────────┐  │
@@ -69,13 +69,119 @@ No router. No providers. No context. There is one screen.
 ```
 
 `TodoApp` renders, in order:
-1. An `<h1>` "Todos".
+1. A header row with an `<h1>` "Todos" on the left and, when
+   available, an inline `<button>` "Install" on the right.
 2. `<TodoForm>` (collapsed Add button, or the inline form).
 3. The sorted list of `<TodoRow>`s.
 4. Empty-state text when the list is empty.
 
 A subtle horizontal divider sits between the last open todo and the
 first completed todo when both groups are present.
+
+## Selector Contract
+
+`scripts/smoke.mjs` is the verification oracle for the per-screen
+behaviour in `spec/README.md` Success Criteria #1–#9. It asserts
+against the **exact** strings, attributes, and DOM shapes listed
+below. The implementation must produce these literally; the smoke
+test must read this section as the source of truth and refer to it
+from its own header.
+
+If you change a selector here, change the matching assertion in
+`smoke.mjs` in the same commit. They are a paired contract.
+
+| What | Selector / value | When |
+|---|---|---|
+| Empty state | The document body contains the literal text `Nothing to do.` | Whenever the todo list is empty |
+| Add button (collapsed form) | `<button aria-label="Add todo">` | When `TodoForm` is collapsed |
+| Title input | `<input aria-label="Title" type="text">` | When the form is expanded |
+| Due-date input | `<input aria-label="Due date" type="date">` | When the form is expanded |
+| Save button | `<button type="submit">` whose trimmed text content is exactly `Save` | When the form is expanded |
+| Cancel button | `<button type="button">` whose trimmed text content is exactly `Cancel` | When the form is expanded |
+| Validation error | `<p role="alert">` containing the thrown error's `message` | After a failed submit |
+| Todo row | Rendered inside an `<li>` element (one `<li>` per todo) | Always |
+| Todo title element | A `<span>` inside that `<li>`, whose `textContent` is **exactly** the todo title (no extra whitespace, no decorating characters) | Always |
+| Strikethrough on completed title | The same title `<span>` gains the Tailwind class `line-through` (used literally — not aliased) | When the row's status is `completed` |
+| Row checkbox | `<input type="checkbox" aria-label='Mark "<title>" as <verb>'>` — `<verb>` is `complete` when status is `open`, `open` when status is `completed`. The `aria-label` always starts with `Mark "<title>"` (note the quoted title). | Always; `checked` reflects status |
+| Delete button | `<button aria-label='Delete "<title>"'>` (literal double-quotes around the title) | Always |
+| Delete confirmation | `window.confirm('Delete this todo?')` is the prompt. Anything truthy from the dialog deletes; falsy keeps the row. | When the delete button is clicked |
+
+Notes:
+
+- The angle-brackets above (`<title>`, `<verb>`) are placeholders;
+  the rendered `aria-label` contains the actual title and verb.
+- `Mark "<title>"` and `Delete "<title>"` use **straight double
+  quotes** (`"`), not typographic quotes. Smoke matches the literal
+  ASCII character.
+- All other DOM choices (wrapping `<div>`s, additional classes,
+  spacing utilities) are at the implementer's discretion. The
+  contract above is the only thing smoke asserts.
+
+## Install button
+
+Files:
+
+```
+src/ui/
+  use-install-prompt.ts
+```
+
+The hook:
+
+- Captures `beforeinstallprompt` on `window`, prevents the default
+  mini-infobar (it's unreliable per the events-spec comments above),
+  and exposes a `promptInstall()` function plus a boolean
+  `canInstall`.
+- Listens to `appinstalled` on `window`. Sets `canInstall` back to
+  false so the button hides after install.
+- Returns `{ canInstall: false }` on iOS Safari and other browsers
+  that never fire the event. Nothing to render.
+
+```ts
+// src/ui/use-install-prompt.ts
+
+import { useCallback, useEffect, useState } from 'react'
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>
+  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>
+}
+
+export function useInstallPrompt() {
+  const [deferred, setDeferred] =
+    useState<BeforeInstallPromptEvent | null>(null)
+
+  useEffect(() => {
+    const onPrompt = (e: Event) => {
+      e.preventDefault()
+      setDeferred(e as BeforeInstallPromptEvent)
+    }
+    const onInstalled = () => setDeferred(null)
+    window.addEventListener('beforeinstallprompt', onPrompt)
+    window.addEventListener('appinstalled', onInstalled)
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onPrompt)
+      window.removeEventListener('appinstalled', onInstalled)
+    }
+  }, [])
+
+  const promptInstall = useCallback(async () => {
+    if (!deferred) return
+    await deferred.prompt()
+    await deferred.userChoice
+    setDeferred(null)
+  }, [deferred])
+
+  return { canInstall: deferred !== null, promptInstall }
+}
+```
+
+In `todo-app.tsx`, render `<button aria-label="Install app">Install</button>`
+inside the header row only when `canInstall` is true. `onClick`
+calls `promptInstall()` (user gesture preserved). No selector
+contract entry — the smoke test runs in headless Chrome which does
+not fire `beforeinstallprompt`; this button is exercised on real
+devices only.
 
 ## Hook
 
@@ -131,14 +237,17 @@ same key — `useState` + reload-after-mutation is enough.
 
 `TodoForm` keeps a local `expanded` flag:
 
-- **Collapsed:** a single "Add" button (`min-h-11`, accent background).
+- **Collapsed:** a single "Add" button (`min-h-11`, accent
+  background). See § "Selector Contract" for the required
+  `aria-label`.
 - **Expanded:** a `<form>` containing
-  - `<input type="text">` for the title (autofocus, `aria-label="Title"`,
-    `maxLength={200}`, required).
-  - `<input type="date">` for the due date (`aria-label="Due date"`,
-    required, `min` set to today's date).
-  - A submit button labeled "Save".
-  - A "Cancel" button that collapses the form.
+  - `<input type="text">` for the title (autofocus,
+    `aria-label="Title"`, `maxLength={200}`, required).
+  - `<input type="date">` for the due date
+    (`aria-label="Due date"`, required). No `min`: the user is
+    allowed to backdate a todo they forgot.
+  - A submit button with text "Save" (`type="submit"`).
+  - A "Cancel" button (`type="button"`) that collapses the form.
 
 On submit:
 1. Read the title and the date string (`YYYY-MM-DD`).
@@ -237,12 +346,61 @@ The system colour scheme is the source of truth; there is no JS toggle.
 
 ## PWA
 
-`vite-plugin-pwa` configuration (in `vite.config.ts`):
+### Icons
+
+**PNG is mandatory.** Chrome's installability check rejects
+SVG-only manifests — the QR scans, the app loads, but the
+"Install app" affordance never appears in the menu and no banner
+fires. Until two PNGs at 192×192 and 512×512 are reachable from
+the manifest, the final artifact (a scannable QR whose
+destination is installable) is not delivered.
+
+The brand mark is a coarse, abstract pair of horizontal bars on the
+dark background. No checkmark, no clipboard. The canonical source
+is SVG; PNGs are derived deterministically from it at build time
+(see `spec/infrastructure/README.md` § "Icon generation").
+
+**`public/icons/icon-192.svg`** — source of truth for the 192 PNG:
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#1a1a1a"/><rect x="40" y="56" width="112" height="32" fill="#f5f5f5"/><rect x="40" y="104" width="112" height="32" fill="#f5f5f5"/></svg>
+```
+
+**`public/icons/icon-512.svg`** — source of truth for the 512 PNG:
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="108" fill="#1a1a1a"/><rect x="108" y="148" width="296" height="88" fill="#f5f5f5"/><rect x="108" y="276" width="296" height="88" fill="#f5f5f5"/></svg>
+```
+
+Both: rounded-corner dark square (`#1a1a1a`), two off-white bars
+(`#f5f5f5`) stacked centered. The fill colour matches `--bg` in dark
+mode and stays legible against `--bg` in light mode (the icon is
+viewed on home screens, not inside the app, so it always reads as a
+dark tile).
+
+The geometry is preserved across sizes: bar width = 58.3 % of icon
+width, bar height = 16.7 %, corner radius = 21 %, horizontal padding
+= 21 %.
+
+The matching PNGs live at `public/icons/icon-192.png` and
+`public/icons/icon-512.png`. They are generated by
+`scripts/gen-icons.mjs` (which uses the already-required
+`puppeteer-core` to rasterize the SVGs; no new dependency). The
+script runs automatically before `vite build` if either PNG is
+missing — see infrastructure.
+
+### `vite-plugin-pwa` config
 
 ```ts
 VitePWA({
   registerType: 'autoUpdate',
-  includeAssets: ['favicon.svg'],
+  includeAssets: [
+    'favicon.svg',
+    'icons/icon-192.svg',
+    'icons/icon-512.svg',
+    'icons/icon-192.png',
+    'icons/icon-512.png',
+  ],
   manifest: {
     name: 'Todos',
     short_name: 'Todos',
@@ -253,8 +411,9 @@ VitePWA({
     background_color: '#1a1a1a',
     theme_color: '#1a1a1a',
     icons: [
-      { src: '/icons/icon-192.svg', sizes: '192x192', type: 'image/svg+xml' },
-      { src: '/icons/icon-512.svg', sizes: '512x512', type: 'image/svg+xml' },
+      // PNG is what Chrome's installability check actually reads.
+      { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+      { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
     ],
   },
   workbox: {
@@ -265,11 +424,21 @@ VitePWA({
 })
 ```
 
+`purpose: 'any'` is explicit because some Chrome installability checks
+require it. No `maskable` variant is shipped; the design isn't
+maskable-safe (bars touch the inner-21 % padding). A `maskable` icon
+can be added later; absence of it does not block install on Chrome 96+.
+
+SVG manifest entries are intentionally omitted. The pre-flight in
+`serve:phone` fetches every URL listed under `manifest.icons` and
+makes sure each returns 200; keeping the list to PNGs means a passing
+pre-flight proves the installability path is good.
+
 No `workbox-window`. No update prompt. No install-prompt button. The
 browser surfaces its own install affordance when criteria are met
 (Android Chrome) or via Share → Add to Home Screen (iOS Safari).
 
-`index.html` adds, once:
+### `index.html` head
 
 ```html
 <meta name="viewport"
@@ -277,8 +446,13 @@ browser surfaces its own install affordance when criteria are met
 <meta name="theme-color" content="#1a1a1a" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
-<link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+<link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png" />
 ```
+
+The apple-touch-icon points at the 192 PNG so older iOS (pre-16.4
+SVG support) gets a sharp home-screen icon. `gen-icons.mjs` produces
+this file as part of the same rasterization step, so no extra work
+is needed.
 
 ## Boundary Rules
 

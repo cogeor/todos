@@ -87,8 +87,10 @@ export function parseTodoId(value: string): TodoId {
 The brand prevents arbitrary strings being passed where a `TodoId` is
 expected. Zero runtime cost.
 
-`parseTodoId` is the boundary for external strings (e.g., values that
-came from storage or — if ever — a URL).
+`parseTodoId` is the canonical parser for any external-string source
+(storage rehydration, URL params, imports). Keep it even when no UI
+code calls it directly — its absence would force `as TodoId` casts
+that defeat the brand.
 
 ## Validation
 
