@@ -249,6 +249,259 @@ If a future failure mode appears that only manifests over the public
 tunnel (e.g. a CSP that breaks on real hostnames), a second oracle
 can be reintroduced. Until then, one script is enough.
 
+### Canonical implementation
+
+The `scripts` agent writes this file verbatim. The behaviour and
+rationale above describe **why**; the code below is the canonical
+**what** — write it as-is, do not redesign.
+
+```js
+// scripts/serve-phone.mjs
+import { spawn } from 'node:child_process'
+import process from 'node:process'
+import qrcode from 'qrcode-terminal'
+
+const PREVIEW_URL = 'http://localhost:4173'
+const TRYCLOUDFLARE_RE = /https:\/\/[a-z0-9.-]+\.trycloudflare\.com/
+
+/** Run `npm run build` to completion. Resolves on exit 0; otherwise
+ *  prints a one-line hint and exits the process with the build's code. */
+function runBuild() {
+  return new Promise((resolve) => {
+    const child = spawn('npm', ['run', 'build'], {
+      stdio: 'inherit',
+      shell: true,
+    })
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve()
+      } else {
+        console.error(
+          `[serve:phone] build failed (exit ${code}). Fix the build before serving.`,
+        )
+        process.exit(code ?? 1)
+      }
+    })
+    child.on('error', (err) => {
+      console.error(`[serve:phone] build spawn error: ${err.message}`)
+      process.exit(1)
+    })
+  })
+}
+
+/** Spawn `npm run preview` with shell:true so Windows resolves .cmd shims. */
+function spawnPreview() {
+  const child = spawn('npm', ['run', 'preview'], {
+    stdio: 'inherit',
+    shell: true,
+  })
+  child.on('error', (err) => {
+    console.error(`[serve:phone] preview spawn error: ${err.message}`)
+    process.exit(1)
+  })
+  return child
+}
+
+/** Poll the preview URL until it responds 200 or 30 s elapses. */
+async function waitForPreview() {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(PREVIEW_URL + '/')
+      if (res.status === 200) return
+    } catch {
+      // not up yet
+    }
+    await new Promise((r) => setTimeout(r, 500))
+  }
+  throw new Error(
+    `preview did not answer 200 at ${PREVIEW_URL}/ within 30 s`,
+  )
+}
+
+/** Run the install-path pre-flight against localhost:4173. */
+async function preflight() {
+  // 1. GET / → 200 and references manifest.
+  const rootRes = await fetch(PREVIEW_URL + '/')
+  if (rootRes.status !== 200) {
+    throw new Error(`GET / returned ${rootRes.status}, expected 200`)
+  }
+  const rootBody = await rootRes.text()
+  if (!rootBody.includes('<link rel="manifest"')) {
+    throw new Error('index.html does not contain <link rel="manifest"')
+  }
+
+  // 2. GET /manifest.webmanifest → 200, JSON, required fields.
+  const manifestRes = await fetch(PREVIEW_URL + '/manifest.webmanifest')
+  if (manifestRes.status !== 200) {
+    throw new Error(
+      `GET /manifest.webmanifest returned ${manifestRes.status}, expected 200`,
+    )
+  }
+  let manifest
+  try {
+    manifest = JSON.parse(await manifestRes.text())
+  } catch (err) {
+    throw new Error(
+      `manifest.webmanifest is not valid JSON: ${err.message}`,
+    )
+  }
+  if (!manifest.name || typeof manifest.name !== 'string') {
+    throw new Error('manifest.name is empty or not a string')
+  }
+  if (!manifest.start_url) {
+    throw new Error('manifest.start_url is missing')
+  }
+  if (manifest.display !== 'standalone') {
+    throw new Error(
+      `manifest.display is ${JSON.stringify(manifest.display)}, expected "standalone"`,
+    )
+  }
+  const icons = Array.isArray(manifest.icons) ? manifest.icons : []
+  const has192 = icons.some(
+    (i) => typeof i.sizes === 'string' && i.sizes.includes('192x192'),
+  )
+  const has512 = icons.some(
+    (i) => typeof i.sizes === 'string' && i.sizes.includes('512x512'),
+  )
+  if (!has192) {
+    throw new Error('manifest.icons has no entry with sizes containing 192x192')
+  }
+  if (!has512) {
+    throw new Error('manifest.icons has no entry with sizes containing 512x512')
+  }
+
+  // 3. Each icon URL → 200.
+  for (const icon of icons) {
+    if (!icon.src) {
+      throw new Error('manifest icon entry missing src')
+    }
+    const iconUrl = new URL(icon.src, PREVIEW_URL).toString()
+    const iconRes = await fetch(iconUrl)
+    if (iconRes.status !== 200) {
+      throw new Error(`GET ${iconUrl} returned ${iconRes.status}, expected 200`)
+    }
+  }
+}
+
+/** Spawn cloudflared with shell:false for clean signal propagation. */
+function spawnTunnel() {
+  const child = spawn(
+    'cloudflared',
+    ['tunnel', '--url', PREVIEW_URL],
+    { stdio: ['ignore', 'pipe', 'pipe'], shell: false },
+  )
+  child.on('error', (err) => {
+    console.error(`[serve:phone] cloudflared spawn error: ${err.message}`)
+    console.error(
+      '[serve:phone] install hint: winget install Cloudflare.cloudflared (Windows) or brew install cloudflared (macOS).',
+    )
+    process.exit(1)
+  })
+  return child
+}
+
+/** Print the QR + URL + phone reminder exactly once. */
+function printQr(url) {
+  console.log('')
+  qrcode.generate(url, { small: true })
+  console.log(url)
+  console.log('iOS:     Safari → Share → Add to Home Screen')
+  console.log('Android: Chrome → Install banner, or menu → Install app')
+}
+
+async function main() {
+  // 1. Build.
+  await runBuild()
+
+  // 2. Boot preview.
+  const preview = spawnPreview()
+
+  const killAll = (signal = 'SIGTERM') => {
+    try {
+      preview.kill(signal)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // 3. Wait for localhost.
+  try {
+    await waitForPreview()
+  } catch (err) {
+    console.error(`[serve:phone] pre-flight failed: ${err.message}`)
+    killAll()
+    process.exit(1)
+  }
+
+  // 4. Pre-flight.
+  try {
+    await preflight()
+  } catch (err) {
+    console.error(`[serve:phone] pre-flight failed: ${err.message}`)
+    killAll()
+    process.exit(1)
+  }
+
+  // 5. Boot tunnel.
+  const tunnel = spawnTunnel()
+
+  // 6 + 7. Capture URL and print exactly once.
+  let printed = false
+  const onLine = (chunk) => {
+    const text = chunk.toString()
+    // Forward all output to our own streams.
+    process.stdout.write(text)
+    if (printed) return
+    const match = text.match(TRYCLOUDFLARE_RE)
+    if (match) {
+      printed = true
+      printQr(match[0])
+    }
+  }
+  tunnel.stdout.on('data', onLine)
+  tunnel.stderr.on('data', onLine)
+
+  // 8. Termination handlers.
+  const killBoth = () => {
+    try {
+      tunnel.kill('SIGTERM')
+    } catch {
+      /* ignore */
+    }
+    try {
+      preview.kill('SIGTERM')
+    } catch {
+      /* ignore */
+    }
+  }
+
+  process.on('SIGINT', () => {
+    killBoth()
+    process.exit(0)
+  })
+  process.on('SIGTERM', () => {
+    killBoth()
+    process.exit(0)
+  })
+
+  // If either child exits unexpectedly, take the other down with it.
+  preview.on('exit', (code) => {
+    killBoth()
+    process.exit(code ?? 0)
+  })
+  tunnel.on('exit', (code) => {
+    killBoth()
+    process.exit(code ?? 0)
+  })
+}
+
+main().catch((err) => {
+  console.error(`[serve:phone] unexpected error: ${err.message}`)
+  process.exit(1)
+})
+```
+
 ## Smoke test — `scripts/smoke.mjs`
 
 The smoke test is the verification oracle for success criteria #1–#9
@@ -290,6 +543,207 @@ The script is the contract between the spec and any implementer:
 "does the prototype work?" is answered by this exit code. The
 selectors above are exact and must match `spec/frontend/README.md`
 § "Selector Contract" verbatim.
+
+### Canonical implementation
+
+The `scripts` agent writes this file verbatim. The behaviour and
+rationale above describe **why**; the code below is the canonical
+**what** — write it as-is, do not redesign.
+
+```js
+// scripts/smoke.mjs
+import process from 'node:process'
+import puppeteer from 'puppeteer-core'
+
+const CHROME_PATH =
+  process.env.CHROME_PATH ||
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+
+const URL = 'http://localhost:4173'
+const TITLE = 'smoke-test-todo'
+
+/** Format Date as YYYY-MM-DD in local time. */
+function ymd(d) {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+async function run() {
+  const browser = await puppeteer.launch({
+    executablePath: CHROME_PATH,
+    headless: 'new',
+  })
+
+  const failures = []
+
+  try {
+    const page = await browser.newPage()
+
+    page.on('pageerror', (err) => {
+      failures.push(`pageerror: ${err.message}`)
+    })
+    page.on('requestfailed', (req) => {
+      const failure = req.failure()
+      const errText = failure ? failure.errorText : 'unknown'
+      if (errText !== 'net::ERR_ABORTED') {
+        failures.push(`requestfailed: ${req.url()} (${errText})`)
+      }
+    })
+
+    // 1 + 2. Goto.
+    await page.goto(URL, { waitUntil: 'networkidle0' })
+
+    // 3. Wipe IndexedDB and reload for determinism.
+    await page.evaluate(
+      () =>
+        new Promise((res, rej) => {
+          const req = indexedDB.deleteDatabase('todos-app')
+          req.onsuccess = () => res()
+          req.onerror = () => rej(req.error)
+          req.onblocked = () => res()
+        }),
+    )
+    await page.reload({ waitUntil: 'networkidle0' })
+
+    // 4. Click Add (collapsed form).
+    await page.waitForSelector('button[aria-label="Add todo"]')
+    await page.click('button[aria-label="Add todo"]')
+
+    // 5. Fill Title.
+    await page.waitForSelector('input[aria-label="Title"]')
+    await page.type('input[aria-label="Title"]', TITLE)
+
+    // 6. Fill Due-date via the native setter so React's onChange fires.
+    const due = new Date()
+    due.setDate(due.getDate() + 7)
+    const dateStr = ymd(due)
+    await page.waitForSelector('input[aria-label="Due date"]')
+    await page.$eval(
+      'input[aria-label="Due date"]',
+      (el, v) => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        ).set
+        setter.call(el, v)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        el.dispatchEvent(new Event('change', { bubbles: true }))
+      },
+      dateStr,
+    )
+
+    // 7. Click Save (the submit button whose trimmed text is "Save").
+    const saveClicked = await page.evaluate(() => {
+      const buttons = Array.from(
+        document.querySelectorAll('button[type="submit"]'),
+      )
+      const save = buttons.find(
+        (b) => (b.textContent || '').trim() === 'Save',
+      )
+      if (!save) return false
+      save.click()
+      return true
+    })
+    if (!saveClicked) {
+      throw new Error('Save button not found (button[type="submit"] with text "Save")')
+    }
+
+    // 8. Assert the row appears (li containing a span with exact textContent).
+    await page.waitForFunction(
+      (title) => {
+        const lis = Array.from(document.querySelectorAll('li'))
+        return lis.some((li) =>
+          Array.from(li.querySelectorAll('span')).some(
+            (s) => s.textContent === title,
+          ),
+        )
+      },
+      { timeout: 5_000 },
+      TITLE,
+    )
+
+    // 9. Toggle the checkbox; assert line-through on the title span.
+    const checkboxSelector = `input[type="checkbox"][aria-label^='Mark "${TITLE}"']`
+    await page.waitForSelector(checkboxSelector)
+    await page.click(checkboxSelector)
+    await page.waitForFunction(
+      (title) => {
+        const lis = Array.from(document.querySelectorAll('li'))
+        for (const li of lis) {
+          const span = Array.from(li.querySelectorAll('span')).find(
+            (s) => s.textContent === title,
+          )
+          if (span) return span.classList.contains('line-through')
+        }
+        return false
+      },
+      { timeout: 5_000 },
+      TITLE,
+    )
+
+    // 10. Auto-accept confirm. Delete the row.
+    page.on('dialog', (d) => {
+      d.accept().catch(() => {
+        /* ignore */
+      })
+    })
+    const deleteSelector = `button[aria-label='Delete "${TITLE}"']`
+    await page.waitForSelector(deleteSelector)
+    await page.click(deleteSelector)
+
+    // 11. Assert the row is gone.
+    await page.waitForFunction(
+      (title) => {
+        const lis = Array.from(document.querySelectorAll('li'))
+        return !lis.some((li) =>
+          Array.from(li.querySelectorAll('span')).some(
+            (s) => s.textContent === title,
+          ),
+        )
+      },
+      { timeout: 5_000 },
+      TITLE,
+    )
+
+    // 12. Reload. Assert empty-state copy is back.
+    await page.reload({ waitUntil: 'networkidle0' })
+    await page.waitForFunction(
+      () =>
+        typeof document.body.innerText === 'string' &&
+        document.body.innerText.includes('Nothing to do.'),
+      { timeout: 5_000 },
+    )
+
+    if (failures.length > 0) {
+      throw new Error(
+        `page errors / failed requests during run:\n  - ${failures.join('\n  - ')}`,
+      )
+    }
+
+    console.log('[smoke] OK')
+  } catch (err) {
+    const extras =
+      failures.length > 0
+        ? `\nadditional page errors / failed requests:\n  - ${failures.join('\n  - ')}`
+        : ''
+    console.error(`[smoke] FAIL: ${err.message}${extras}`)
+    await browser.close().catch(() => {
+      /* ignore */
+    })
+    process.exit(1)
+  }
+
+  await browser.close()
+  process.exit(0)
+}
+
+run().catch((err) => {
+  console.error(`[smoke] unexpected error: ${err.message}`)
+  process.exit(1)
+})
+```
 
 ## Quality gates
 
