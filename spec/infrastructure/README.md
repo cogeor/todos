@@ -10,21 +10,19 @@
   "scripts": {
     "dev":         "vite",
     "build":       "vite build",
-    "prebuild":    "node scripts/gen-icons.mjs",
     "preview":     "vite preview --host 0.0.0.0 --port 4173",
     "typecheck":   "tsc --noEmit",
-    "gen:icons":   "node scripts/gen-icons.mjs",
     "serve:phone": "node scripts/serve-phone.mjs",
     "smoke":       "node scripts/smoke.mjs"
   }
 }
 ```
 
-`prebuild` runs automatically before `build` (npm convention) so
-`npm run build` and `npm run serve:phone` always have fresh PNGs.
-`gen-icons.mjs` short-circuits when the PNGs already exist and are
-newer than the SVG source, so it's effectively free after the first
-run.
+No `prebuild`. The PNG icons are not generated at build time — they
+are written directly to disk by the `icons` agent from base64
+embedded in `spec/frontend/README.md` § "Icons". The agent decodes
+each block once at file-write time. Nothing rasterizes during
+`npm run build`.
 
 ## Dependencies
 
@@ -115,32 +113,15 @@ export default defineConfig({
 })
 ```
 
-## Icon generation — `scripts/gen-icons.mjs`
+## Icons
 
-Chrome's PWA install prompt requires PNG icons; SVG-only manifests
-do not pass the installability check. The QR scans, the app loads,
-no install banner appears. To deliver the **final artifact** (a
-scannable QR whose destination is installable), the PNGs must exist
-before `vite build` runs.
-
-The script:
-
-1. Reads `public/icons/icon-192.svg` and `public/icons/icon-512.svg`.
-2. Skips work if `icon-{192,512}.png` already exist and their mtime
-   is newer than the matching SVG.
-3. Otherwise launches `puppeteer-core` against the system Chrome
-   (same resolver as `scripts/smoke.mjs` — `CHROME_PATH` env
-   override, Windows/macOS/Linux default paths), sets the viewport
-   to the target size, loads the SVG inline with `margin: 0`, takes
-   a same-size `screenshot({ type: 'png', omitBackground: false })`,
-   and writes the result alongside the SVG.
-4. Exits 0 on success. On failure (Chrome not found, screenshot
-   error) exits non-zero with a one-line message; this fails
-   `prebuild` which fails `build`.
-
-No new dependency: `puppeteer-core` is already required for the
-smoke test. Cloning Chrome is not needed; the rasterizer is the
-user's existing Chrome install.
+`scripts/` does not own icon generation. The two PNGs Chrome's
+installability check requires (`/icons/icon-192.png`,
+`/icons/icon-512.png`) are written directly to disk by the `icons`
+agent from base64 embedded in `spec/frontend/README.md` § "Icons".
+No script, no `prebuild` hook, no puppeteer rasterization on the icon
+path. `puppeteer-core` stays in `devDependencies` because the smoke
+test uses it; it is not used for icons.
 
 ## Tailwind
 
@@ -185,9 +166,11 @@ print. There is no second test script. If the QR prints, the install
 path is good; if any pre-flight check fails, the QR never prints and
 the implementer sees a one-line error.
 
-The user-side narrative (which phone browser, install gesture, tunnel
-caveats) lives in `user_flow.md` and is summarised in
+The user-side narrative (which phone browser, install gesture) is in
 `spec/README.md` § "Phone side — what the user does beyond scanning."
+Operator-facing troubleshooting (tunnel caveats, Wi-Fi blocks, etc.)
+is in the root `README.md` § "Troubleshooting" and is not spec
+material.
 
 ### Behaviour
 

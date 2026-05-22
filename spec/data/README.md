@@ -4,6 +4,10 @@
 
 This layer owns persistence and nothing else. The UI never sees Dexie.
 
+This folder is the **data** module. Orchestration lives in
+`spec/README.md` § "Implementation Plan" — this file describes only
+what to build.
+
 ## Files
 
 ```

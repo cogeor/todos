@@ -43,6 +43,13 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# --- author scratch (local-only, not for the implementer) ---
+# spec/_authoring/ holds retrospectives. Root-level .md files other than
+# README.md are also author scratch (findings, drafts, prompts).
+/spec/_authoring/
+/*.md
+!/README.md
+
 # --- editors ---
 .vscode/
 .idea/

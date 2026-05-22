@@ -5,6 +5,10 @@
 This is the smallest layer the app needs and the only one with rules
 that change least over time.
 
+This folder is the **domain** module. Orchestration (when to run, how
+to spawn, when to verify) lives in `spec/README.md` § "Implementation
+Plan" — this file describes only what to build.
+
 ## Files
 
 ```
