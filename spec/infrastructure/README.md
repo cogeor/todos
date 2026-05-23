@@ -19,9 +19,9 @@
 ```
 
 No `prebuild`. The PNG icons are not generated at build time — they
-are written directly to disk by the `icons` agent from base64
-embedded in `spec/frontend/README.md` § "Icons". The agent decodes
-each block once at file-write time. Nothing rasterizes during
+are emitted by the `icons` agent's helper (`scripts/make-icons.mjs`,
+specified verbatim in `spec/frontend/README.md` § "Icons"). The agent
+writes the helper once and runs it once. Nothing rasterizes during
 `npm run build`.
 
 ## Dependencies
@@ -117,11 +117,13 @@ export default defineConfig({
 
 `scripts/` does not own icon generation. The two PNGs Chrome's
 installability check requires (`/icons/icon-192.png`,
-`/icons/icon-512.png`) are written directly to disk by the `icons`
-agent from base64 embedded in `spec/frontend/README.md` § "Icons".
-No script, no `prebuild` hook, no puppeteer rasterization on the icon
-path. `puppeteer-core` stays in `devDependencies` because the smoke
-test uses it; it is not used for icons.
+`/icons/icon-512.png`) are emitted by `scripts/make-icons.mjs`, a
+pure-Node helper specified in full in `spec/frontend/README.md`
+§ "Icons". The `icons` agent writes the helper once from the spec
+and runs it once. No `prebuild` hook, no puppeteer rasterization, no
+external rasterizer dependency. `puppeteer-core` stays in
+`devDependencies` because the smoke test uses it; it is not used for
+icons.
 
 ## Tailwind
 
@@ -165,6 +167,12 @@ contains the orchestration, the pre-flight validation, and the QR
 print. There is no second test script. If the QR prints, the install
 path is good; if any pre-flight check fails, the QR never prints and
 the implementer sees a one-line error.
+
+**Must run in the foreground.** The script's QR output is rendered to
+stdout via `qrcode-terminal`. If the main agent backgrounds the
+process or routes its stdout through a non-terminal pipe, the QR is
+not visible to the user. Run it as a foreground command, attached to
+the user's terminal, until the user terminates with Ctrl-C.
 
 The user-side narrative (which phone browser, install gesture) is in
 `spec/README.md` § "Phone side — what the user does beyond scanning."

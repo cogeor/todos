@@ -25,8 +25,10 @@ If you find this repetitive, that is the intent.
 
 The **main agent** — the interactive coding agent the user opened in
 the repo (Claude Code or equivalent) — owns this final step. Subagents
-do not run `serve:phone`. The QR appears in the terminal of the agent
-that is in contact with the user.
+do not run `serve:phone`. The main agent runs it **in the foreground**
+so its stdout (which contains the QR) reaches the user's terminal.
+Backgrounding the process, redirecting its output, or wrapping it in
+a captured-output harness all defeat the deliverable.
 
 ## Core User Story
 
@@ -177,12 +179,10 @@ todos/
     infrastructure/README.md
 
   public/
-    favicon.svg
     icons/
-      icon-192.svg            # geometry source of truth
-      icon-512.svg
-      icon-192.png            # decoded from base64 in spec/frontend/README.md
-      icon-512.png            # decoded from base64 in spec/frontend/README.md
+      make-icons.mjs          # pure-Node PNG writer; emits the two PNGs
+      icon-192.png            # produced by make-icons.mjs (solid dark square)
+      icon-512.png            # produced by make-icons.mjs
 
   src/
     main.tsx
@@ -306,17 +306,22 @@ contact with the user. Subagents do not run `serve:phone`.
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | `spec/data/README.md` + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
 | **ui** | `src/App.tsx`, `src/main.tsx`, `src/ui/` | `App.tsx`, `main.tsx`, `ui/styles.css`, `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/todo-row.tsx`, `ui/todo-form.tsx`, `ui/todo-app.tsx` (8) | `spec/frontend/README.md` (whole file; Selector Contract is binding) | All 8 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. |
 | **scripts** | `scripts/` | `serve-phone.mjs`, `smoke.mjs` (2) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Both exist. `serve-phone.mjs` = build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
-| **icons** | `public/`, `public/icons/` | `favicon.svg`, `icons/icon-192.svg`, `icons/icon-512.svg`, `icons/icon-192.png`, `icons/icon-512.png` (5) | `spec/frontend/README.md` § Icons | All 5 exist. SVGs match the canonical geometry (dark square + two light bars). PNGs are decoded byte-for-byte from the base64 blocks in the spec and land at 2 232 / 6 464 bytes respectively. |
+| **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | `spec/frontend/README.md` § Icons | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
 | **configs** | repo root | `package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (6) | `spec/README.md`, `spec/infrastructure/README.md` | All 6 exist. `package.json` dependency list matches the infrastructure spec exactly. |
 
-**Total: 29 files across 6 parallel agents.**
+**Total: 26 files across 6 parallel agents.** (The icons module
+writes 1 helper plus 2 generated PNGs; only the helper is an agent
+Write.)
 
 ### Main-agent orchestration
 
-1. **Read the spec.** In one message, read all 5 files under `spec/`
-   (`spec/README.md`, `domain/`, `data/`, `frontend/`,
-   `infrastructure/`) with parallel Read calls. Do not read anything
-   else.
+1. **Read the central spec.** Read `spec/README.md` only. Do **not**
+   eagerly read the per-folder sub-specs — each module agent reads its
+   own. The Implementation Plan table below is the complete handoff
+   context the main agent needs for orchestration. Read a sub-spec
+   lazily, on demand, only if verification fails or a subagent
+   reports a question that the central spec does not answer. The
+   point is to keep the main agent's context tight at spawn time.
 2. **Spawn the modules.** In one message, spawn all 6 module agents
    with parallel Agent calls. Hand each agent its row from the table
    above.
@@ -332,9 +337,13 @@ contact with the user. Subagents do not run `serve:phone`.
    write time.
 6. **Smoke.** Boot `npm run preview` in the background; run
    `npm run smoke`; assert exit 0.
-7. **Ship.** Run `npm run serve:phone`. **One QR must print** — in the
-   main agent's terminal, where the user can see it. Do not declare
-   success until the QR is on screen. See § "Deliverable".
+7. **Ship.** Run `npm run serve:phone` **in the foreground.** Do not
+   background it, do not redirect its stdout, do not wrap it in a
+   harness that captures output. The script's stdout *is* the QR;
+   backgrounding it means the QR never reaches the user's terminal.
+   The main agent stays attached to the script until the user
+   terminates it with Ctrl-C. **Do not declare success until the user
+   has confirmed the QR is on screen.** See § "Deliverable".
 
 ## MVP Cut
 

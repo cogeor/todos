@@ -364,228 +364,119 @@ The system colour scheme is the source of truth; there is no JS toggle.
 
 ### Icons
 
-**PNG is mandatory.** Chrome's installability check rejects SVG-only
-manifests — the QR scans, the app loads, but the "Install app"
-affordance never appears in the menu and no banner fires. Until two
-PNGs at 192×192 and 512×512 are reachable from the manifest, the
-final artifact (a scannable QR whose destination is installable) is
-not delivered.
+**PNG icons are mandatory for PWA install.** Chrome's installability
+check rejects manifests without PNG icons at 192×192 and 512×512. SVG
+manifest entries do not satisfy the check.
 
-The brand mark is a coarse, abstract pair of horizontal bars on the
-dark background. No checkmark, no clipboard. SVG is the legible
-source of truth for the geometry. The PNGs are pre-rasterized and
-embedded below as base64, so the `icons` agent writes them directly
-to disk — no build-time rasterizer (`puppeteer-core`, `sharp`,
-etc.) is needed for icons. If you change the SVG geometry, regenerate
-the PNG base64 (open the SVG in Chrome at the target window size,
-`chrome --headless --screenshot --window-size=N,N --default-background-color=00000000 file.svg`,
-base64-encode the resulting PNG) and paste in.
+The brand mark for v1 is a **solid dark square** (`#1a1a1a` ≈ gray 26).
+No bars, no glyph, no SVG anywhere. The mark is decorative; the
+deliverable is "QR scans → app installs," and installability requires
+PNG, not a particular design. A solid dark tile is the same aesthetic
+register as the rest of the app (dark grey + white only) and removes
+every transcription risk a richer mark would introduce.
 
-The geometry is preserved across sizes: bar width = 58.3 % of icon
-width, bar height = 16.7 %, corner radius = 21 %, horizontal padding
-= 21 %. The fill colour (`#1a1a1a`) matches `--bg` in dark mode and
-stays legible against `--bg` in light mode (the icon is viewed on
-home screens, not inside the app, so it always reads as a dark tile).
+#### How the PNGs land on disk
 
-#### `public/favicon.svg`
+The icons agent writes one file — `scripts/make-icons.mjs` (verbatim
+from the code block below) — then runs `node scripts/make-icons.mjs`.
+The script emits both PNGs at the canonical paths and exits. No
+dependency, no rasterizer, no base64. The PNGs are pure Node output:
+PNG signature + IHDR (grayscale, 8-bit) + zlib-deflated IDAT scanlines
++ IEND, with a 256-entry CRC32 table computed inline.
 
-Browser tab icon; SVG is fine for tabs (the installability check does
-not apply here). Same design as the 192 icon:
+```js
+// scripts/make-icons.mjs
+//
+// Pure-Node PNG writer for two solid-color icons. Reads nothing,
+// pulls no rasterizer dependency. The icons agent writes this file
+// from the spec, then runs `node scripts/make-icons.mjs`. The two
+// PNGs land at `public/icons/icon-192.png` and
+// `public/icons/icon-512.png`.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#1a1a1a"/><rect x="40" y="56" width="112" height="32" fill="#f5f5f5"/><rect x="40" y="104" width="112" height="32" fill="#f5f5f5"/></svg>
+import { writeFileSync, mkdirSync } from 'node:fs'
+import { deflateSync } from 'node:zlib'
+import { dirname } from 'node:path'
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256)
+  for (let i = 0; i < 256; i++) {
+    let c = i
+    for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    t[i] = c >>> 0
+  }
+  return t
+})()
+
+function crc32(buf) {
+  let c = 0xffffffff
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8)
+  return (c ^ 0xffffffff) >>> 0
+}
+
+function chunk(type, data) {
+  const len = Buffer.alloc(4)
+  len.writeUInt32BE(data.length, 0)
+  const typeBuf = Buffer.from(type, 'ascii')
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(Buffer.concat([typeBuf, data])), 0)
+  return Buffer.concat([len, typeBuf, data, crc])
+}
+
+function solidPng(size, gray) {
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(size, 0) // width
+  ihdr.writeUInt32BE(size, 4) // height
+  ihdr[8] = 8                 // bit depth
+  ihdr[9] = 0                 // colour type: grayscale
+  ihdr[10] = 0                // compression
+  ihdr[11] = 0                // filter
+  ihdr[12] = 0                // interlace
+  const raw = Buffer.alloc(size * (1 + size))
+  for (let y = 0; y < size; y++) {
+    raw[y * (1 + size)] = 0   // per-scanline filter byte: None
+    for (let x = 0; x < size; x++) raw[y * (1 + size) + 1 + x] = gray
+  }
+  return Buffer.concat([
+    sig,
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw)),
+    chunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+const GRAY = 0x1a // matches `--bg` in dark mode; reads as a dark tile on home screens
+
+for (const size of [192, 512]) {
+  const out = `public/icons/icon-${size}.png`
+  mkdirSync(dirname(out), { recursive: true })
+  writeFileSync(out, solidPng(size, GRAY))
+}
+console.log('wrote public/icons/icon-192.png and icon-512.png')
 ```
 
-#### `public/icons/icon-192.svg` — source of truth for the 192 PNG geometry
+The two PNGs decode at exact 192×192 / 512×512 dimensions, color type 0
+(grayscale), pixel value 26. Chrome's installability check accepts
+them.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#1a1a1a"/><rect x="40" y="56" width="112" height="32" fill="#f5f5f5"/><rect x="40" y="104" width="112" height="32" fill="#f5f5f5"/></svg>
-```
+#### What the icons agent does
 
-#### `public/icons/icon-512.svg` — source of truth for the 512 PNG geometry
+1. Write `scripts/make-icons.mjs` to disk, verbatim from the block
+   above.
+2. Run `node scripts/make-icons.mjs` once. The PNGs appear at
+   `public/icons/icon-192.png` and `public/icons/icon-512.png`.
+3. Exit.
 
-```svg
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="108" fill="#1a1a1a"/><rect x="108" y="148" width="296" height="88" fill="#f5f5f5"/><rect x="108" y="276" width="296" height="88" fill="#f5f5f5"/></svg>
-```
-
-#### `public/icons/icon-192.png` — base64 of the pre-rasterized 192 PNG
-
-The `icons` agent writes this with
-`fs.writeFileSync('public/icons/icon-192.png', Buffer.from(b64.replace(/\s/g, ''), 'base64'))`
-where `b64` is the block below. Whitespace and newlines inside the
-block are not part of the data. The result is a 2 232-byte PNG at
-exact dimensions 192×192.
-
-```
-iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAYAAABS3GwHAAAIbUlEQVR4nOzdX2xbZxnH8cf2cdop
-dJNCndouLR1a2DRA42KCbmzaboBKlCzijzRNTCAGEpfcgNQxJGBC6hDSqMQlUm8QWhkS3cLEzSRW
-1A40bQJGJ5ZlQFkhdmIrUpe0deM45vdGSeamcWLXjmv7+X6ko9fn2E7S5vn5fc7rP4nsBhoaGrp5
-586dB5eWlrLxeDxdrVYzsVgsozFdM77P0LP0O5zX7zCvMacxpzEfRv3Oc/qd50ql0p9nZ2fftRsk
-Zh2WSqVui6LosP4TPq/d+7UlDZ6Vtf1RwRhfXFx8oVAovG0d1IkAJNLp9P2h4LUd1v6HDajvLW3j
-miHG8/n8aV2u2DbazgDEVfiPquh/qO2DBjRJs8I5Dd/P5XK/0rhk22BbApDNZkf1w/9Yhf9RA1qk
-Wvq7tiOaEV6wNmtrAPbs2fPJRCLxM108aED7ndF5wndnZmZetjZpSwDU6typM/qndPGwAdtvvFKp
-PD49PX3WWtRyADKZzKMajqvdSRjQIWqJKtq+qbbouLWglaKNqfifVOE/rS1uQAeFmtP20K5du+Jz
-c3On7Dpd7wyQVPE/ox/gCwbceM9OTU19ReOCNanpAOzdu/f9WqM9qeK/z4AuoXbolGrySwpCsZn7
-NRUArfLcqpPdF/WNPmRA9/mnVok+o1WifzV6h4YDsHv37l0DAwOvGs/kortNlEqlTzT6+qJGT15j
-yWTyWaP40f1u37FjxzPW4IN7Q6tAWuc/qtbnqwb0ALXoI4ODgzvn5+df3Oq2WwYgm80+pi/4EwN6
-SFikUQj+oRC8sentNrtyeHj43iiKXjJesozedFnbp7UydKbeDeqeAwwNDX0gkUicNIofvesmLY/+
-NtRyvRvUDYBOJH6uaSRlQA8LNRxque71Gx1U3/8pDacN6BN6fuAuPT/w+vrjG84A4bX8BvQRtfMb
-LuRcEwAteT6oaeMBA/qIavqzobbXH49vcMMnDehDqu0frD92VQDU+4/xIjf0q9DZZDKZQ7XHrgqA
-ev8fGdDHFIKjtftrAUilUh/XlR8zoL/dpU7njtWdtQAkk8lDBvgwtnphLQBqf8YMcKC21pefCFP7
-k46iaEotUMc/KhHoNAWgWi6X9xaLxdzyDKDiH6P44UWodbX8D4XLqy0Q7Q+8Wa752MpbHcMbiQcM
-8GOhVCqlokQi8RGj+OHPgNqgO0MA0gY4FGo/rhPiAwY4FGo/BIAZAC6F2o/C3+YywKFQ+7RAcGt5
-BtBzAswAcCnUfqSRAMCrAyEAtxjg0y38YQu4RgDgGgGAawQArhEAuEYA4BoBgGsEAK4RALhGAOAa
-AYBrBACuEQC4RgDgGgGAa5F1ucnJSUPvGhkZsW7GDADXCABcIwBwjQDANQIA1wgAXCMAcI0AwDUC
-ANcIAFwjAHCNAMA1AgDXCABcIwBwjQDANQIA1wgAXCMAcI0AwDUCANcIAFwjAHCNAMA1AgDXCABc
-IwBwjQDANQIA1wgAXCMAcC2WzWarBjjFDADXCABcIwBwjQDANQIA1wgAXCMAcI0AwDUCANcIAFwj
-AHCNAMA1AgDXCABcIwBwLbIuNzk5aehdIyMj1s2YAeAaAYBrBACuEQC4RgDgGgGAawQArhEAuEYA
-4BoBgGsEAK4RALhGAOAaAYBrBACuEQC4RgDgGgGAawQArhEAuEYA4BoBgGsEAK4RALhGAOAaAYBr
-BACuEQC4RgDgGgGAawQArsWy2WzVAKeYAeAaAYBrBACuEQC4RgDgGgGAawQArhEAuEYA4BoBgGsE
-AK4RALhGAOAaAYBrBACuhQBcMMCnCyEAeQN8yser1SoBgEuh9qNYLEYA4FKofWYAuMUMANeWZ4Cl
-pSUCAJdC7TMDwLNz8XK5/Df1Qnw2ELxZWFxcfC1eLBZz2nnFAEf0mP8H1f7c8ksh1AadNMCX5ZqP
-1+4AHoSWX+3PewGYmpp6U8OEAT68UigUlhd/1l4NqiUhZgG4UNvyrwVAswIBgBdrtR6rPZrNZv8X
-BgP614Ra/jtWd656Q4xmgccM6GOq8W/X7sfW3yCTybykHukBA/qMiv9ULpd7sPbYNW+JVPF/z4A+
-VKlUjqw/dk0A1B+dUVKeM6CPhJqemZn50/rjG74pXkuiT+gOFQP6QKhlbRt2NhsGYHp6+qxaoV8a
-0B9+kc/n39joirofi6JZ4DtKzTsG9LbzejB/ot6VdQOgxBR0xzGF4JIBvelyuVwe1Xltsd4NNv1g
-LN3xLwrBNwzoQepivlYoFP662W0StoW5ubmzg4ODNykI9xnQI1T8T6mLObbV7WLWmPAX5cc1fs6A
-Lqe2/fd6wivU6pbvdGz0s0GrpVLpEX3hNw3obhNXrlx52Boo/qDhD8ednZ19N5wUG58liu51YWFh
-YTTUaqN3aOrToXVSPKFvsI9nitGFfhdqs1gsvtXMnbY8CV7v0qVLC/Pz8yd0YryTE2N0iZ/qwfnr
-qs0r1qRGT4I3pBPjRzQc1zZgQOddDkudWu35tV2nlgIQDA8P3xNF0W+MN9Kgs3KLi4uHZmZmXrcW
-NN0CrXfx4sX/xuPx4wMDA5F2727H1wQ2saBz0GNqdx7Wye5/rEUtzwC10un0AZ0XPL2yWgS0Tfgo
-E9XVCbU8R9TynLM2aWsAVqktujeRSBzTD3y3AS1S7b+q4Vt6cus1a7NtCcDq19aM8GWF4Ki2Ww1o
-kgr/36qdx7XCc8IafGKrWdsZgFUJrRbdo3F0ZbvdgPrCOv7zKv7n9Yj/si5v6xuzOhGAq6RSqduS
-yeQXdXFU/8iDSjh/qtWxlXcentY4XqlUnisUCm9bB3U8AOsMKBD7db6wT5f3KQz7w7iy7V85drOh
-Z6mww8sSzmt7Z2U8r2PL+yr48yr4cHzBbpD/AwAA//+d9KgYAAAABklEQVQDAOJ5g9QAJGxHAAAA
-AElFTkSuQmCC
-```
-
-#### `public/icons/icon-512.png` — base64 of the pre-rasterized 512 PNG
-
-Same pattern as the 192. The result is a 6 464-byte PNG at exact
-dimensions 512×512.
-
-```
-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
-AABIqFHoKWNjYwWgG42OjhZ6hxUAAEhIAABAQgIAABISAACQkAAAgIQEAAAkJAAAICEBAAAJCQAA
-SEgAAEBCAgAAEhIAAJCQAACAhAQAACQkAAAgIQEAAAkJAABISAAAQEICAAASEgAAkJAAAICEBAAA
-JCQAACAhAQAACQkAAEhIAABAQgIAABISAACQkAAAgIQEAAAkJAAAICEBAAAJCQAASEgAAEBCAgAA
-EhIAAJCQAACAhAQAACQkAAAgIQEAAAkJAABISAAAQEICAAASEgAAkJAAAICEBAAAJCQAACAhAQAA
-CQkAAEhIAABAQgIAABISAACQkAAAgIQEAAAkJAAAICEBAAAJCQAASEgAAEBCAgAAEhIAAJCQAACA
-hAQAACQkAAAgIQEAAAkJAABISAAAQEICAAASEgAAkJAAAICEBAAAJCQAACAhAQAACQkAAEhIAABA
-QgIAABISAACQkAAAgIQEAAAkJAAAICEBAAAJCQAASEgAAEBCAgAAEhIAAJCQAACAhAQAACQkAAAg
-oVqr1VosAEAqVgAAICEBAAAJCQAASEgAAEBCAgAAEhIAAJCQAACAhAQAACQkAAAgIQEAAAkJAABI
-SAAAQEICAAASEgAAkJAAAICEBAAAJCQAACAhAQAACQkAAEhIAABAQgIAABISAACQkAAAgIQEAAAk
-JAAAICEBAAAJCQAASEgAAEBCAgAAEhIAAJCQAACAhAQAACQkAAAgIQEAAAkJAABISAAAQEICAAAS
-EgAAkJAAAICEGoWeMjY2VgC60ejoaKF3WAEAgIQEAAAkJAAAICEBAAAJCQAASEgAAEBCAgAAEhIA
-AJCQAACAhAQAACQkAAAgIQEAAAkJAABISAAAQEICAAASEgAAkJAAAICEBAAAJCQAACAhAQAACQkA
-AEhIAABAQgIAABISAACQkAAAgIQEAAAkJAAAICEBAAAJCQAASEgAAEBCAgAAEhIAAJCQAACAhAQA
-ACQkAAAgIQEAAAkJAABISAAAQEICAAASEgAAkJAAAICEBAAAJCQAACAhAQAACQkAAEhIAABAQgIA
-ABISAACQkAAAgIQEAAAkJAAAICEBAAAJCQAASEgAAEBCAgAAEhIAAJCQAACAhAQAACQkAAAgIQEA
-AAkJAABISAAAQEICAAASEgAAkJAAAICEBAAAJCQAACAhAQAACQkAAEhIAABAQgIAABISAACQkAAA
-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
-VAMA4+yHvGRFXVcAAAAASUVORK5CYII=
-```
+That is the entire icons module. No SVG content of any kind. No
+favicon file. The browser tab's icon falls back to its default; this
+is acceptable for a personal PWA whose installed surface is the home
+screen, not the browser tab.
 
 The PNGs are what `manifest.icons` references (see § "`vite-plugin-pwa`
 config" below) and what the apple-touch-icon resolves to (see
 § "`index.html` head"). The pre-flight in `serve:phone` will fetch
-each manifest icon URL and require a 200 response — without these
-two PNG files at the right paths, the install path fails.
+each manifest icon URL and require a 200 response — if the PNGs are
+missing or empty, the install path fails before the QR prints.
 
 ### `vite-plugin-pwa` config
 
@@ -593,9 +484,6 @@ two PNG files at the right paths, the install path fails.
 VitePWA({
   registerType: 'autoUpdate',
   includeAssets: [
-    'favicon.svg',
-    'icons/icon-192.svg',
-    'icons/icon-512.svg',
     'icons/icon-192.png',
     'icons/icon-512.png',
   ],
@@ -623,11 +511,11 @@ VitePWA({
 ```
 
 `purpose: 'any'` is explicit because some Chrome installability checks
-require it. No `maskable` variant is shipped; the design isn't
-maskable-safe (bars touch the inner-21 % padding). A `maskable` icon
-can be added later; absence of it does not block install on Chrome 96+.
+require it. No `maskable` variant is shipped; the v1 mark is a solid
+square so maskable adds nothing visible. Absence of `maskable` does
+not block install on Chrome 96+.
 
-SVG manifest entries are intentionally omitted. The pre-flight in
+No SVG entries — the manifest is PNG-only. The pre-flight in
 `serve:phone` fetches every URL listed under `manifest.icons` and
 makes sure each returns 200; keeping the list to PNGs means a passing
 pre-flight proves the installability path is good.
@@ -647,10 +535,9 @@ browser surfaces its own install affordance when criteria are met
 <link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png" />
 ```
 
-The apple-touch-icon points at the 192 PNG so older iOS (pre-16.4
-SVG support) gets a sharp home-screen icon. The 192 PNG is the same
-file the manifest references — no extra work, the `icons` agent
-writes it once from the base64 block above.
+The apple-touch-icon points at the 192 PNG produced by the icons
+helper (see § "Icons" above). It is the same file the manifest
+references — no extra agent work, no extra rasterization step.
 
 ## Boundary Rules
 
