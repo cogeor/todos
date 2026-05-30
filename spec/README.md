@@ -67,7 +67,9 @@ that protect item 10. **Item 10 — the QR — is the deliverable.** If
 unverified, you skipped the gates.
 
 1. `npm install`, `npm run build`, and `npm run preview` complete with
-   no TypeScript or bundler errors.
+   no TypeScript or bundler errors. `npm run verify` passes: every file
+   in `spec/manifest.json` exists, no source file exists outside it, and
+   the repo-root `package.json` matches `spec/package.json`.
 2. On first open, the app shows an empty state and an **Add** affordance.
 3. Tapping Add reveals an inline form (title input + date input + Save).
    Submitting with a non-empty title and a valid date creates the todo.
@@ -197,6 +199,9 @@ todos/
     data/README.md
     frontend/README.md
     infrastructure/README.md
+    manifest.json             # the exact file set a finished run must produce
+    package.json              # canonical manifest; main agent copies it verbatim
+    verify.mjs                # `npm run verify`: file-set + package.json check
 
   public/
     icons/
@@ -387,23 +392,38 @@ neither importer has to reimplement it.
    have already read a sub-spec, you must **still** dispatch its agent
    — do not implement it inline.
 2. **Write `package.json`, then start install at t=0.** Before
-   spawning any agent, the main agent writes `package.json` itself from
-   the canonical block below — a fixed, pinned transcription with no
-   design decisions — and immediately kicks `npm install` as a
-   background command. Because the manifest already exists, install
-   begins at t=0 and runs concurrently with every module agent: no
-   poll, no `ENOENT` race, no dependence on harness file-watch timing.
-   This is the only file the main agent writes.
+   spawning any agent, the main agent **copies the checked-in
+   `spec/package.json` to the repo root verbatim** — it is the canonical
+   install manifest, a fixed transcription with no design decisions. Do
+   **not** author, synthesize, or "improve" one from memory; the deps and
+   scripts are pinned and `npm run verify` rejects any deviation (see
+   § "Canonical `package.json`"). Then immediately kick `npm install` as a
+   background command. Because the manifest already exists, install begins
+   at t=0 and runs concurrently with every module agent: no poll, no
+   `ENOENT` race, no dependence on harness file-watch timing. This is the
+   only file the main agent writes.
 3. **Spawn the agents.** In one message, spawn all nine module agents
    with parallel Agent calls. Hand each agent its row from the table
    above.
-4. **Wait** for all nine module agents and `npm install` to return.
-   With install started at step 2 it is normally already done by the
-   time the agents return.
-5. **Verify — concurrent.** In one message, run `npm run typecheck`
-   and `npm run build`. Both must pass. This is where the modules
-   connect: any cross-module type mismatch surfaces here, not at
-   write time.
+4. **Wait for the batch — it is asynchronous.** The nine agents run
+   concurrently and each can take **several minutes**; the batch is done
+   only when **every** agent has returned its report. Wait on those
+   reports — do **not** infer progress by polling the filesystem. A
+   missing, empty, or half-written tree mid-run is **normal**: it means
+   agents are still working, not that they failed. Do **not** start
+   writing module files yourself because files "aren't there yet" — that
+   is the single most common way this run goes wrong (see § "Recovery").
+   With install started at step 2 it is normally already done by the time
+   the agents return.
+5. **Verify the file set first, then types + build.** Run
+   `npm run verify` (cheap, no compile): it confirms every file in
+   `spec/manifest.json` exists, that **no source file exists outside the
+   manifest** (an invented file or a wrong partition fails here), and
+   that the repo-root `package.json` matches `spec/package.json`. Only
+   once `verify` is green, run `npm run typecheck` and `npm run build`
+   (these may run concurrently). All three must pass. `verify` catches
+   structural drift in milliseconds; typecheck/build then catch any
+   cross-module type mismatch.
 6. **Smoke.** Run `npm run smoke`; assert exit 0. The smoke script
    runs entirely on its **own dedicated port (42730), never 41730**: it
    frees 42730 and boots **and tears down** its own preview there
@@ -431,50 +451,65 @@ neither importer has to reimplement it.
    this step to the user. **Do not declare success until the full QR is
    on screen in your reply.**
 
+### Recovery — when an agent fails or output looks wrong
+
+The steps above are the happy path. The moment reality deviates, there is
+exactly one correct response, and one tempting wrong one. **The wrong one
+— the main agent picking up a module and implementing it inline — is what
+fails the orchestration contract** (§ "The main agent writes exactly one
+file"). Do not take it, even under time pressure, even if it looks faster.
+
+- **An agent is slow or silent.** It is still working (§ step 4). Wait.
+  Do not implement its files.
+- **An agent returns an error, times out, or reports a question.** Read
+  its own sub-spec (lazily, only now), then **re-dispatch that one agent**
+  with the error or the answer. Re-running one agent is cheap; becoming
+  the implementer is not.
+- **`npm run verify` reports a missing file.** The owning agent did not
+  finish or wrote to the wrong path — re-dispatch that agent. Do not
+  create the file yourself.
+- **`npm run verify` reports an unexpected file.** An agent invented a
+  path the partition does not include (e.g. a renamed component, an extra
+  config). Re-dispatch the owning agent with the manifest's exact path
+  list; delete the stray file. Do not "adopt" the invented layout.
+- **`npm run verify` reports a `package.json` mismatch.** The root
+  manifest was authored instead of copied — overwrite it with
+  `spec/package.json` verbatim and re-run install if the dependency set
+  changed.
+- **typecheck or build fails.** This is a cross-module contract gap, not
+  a cue to rewrite a module by hand. Identify the owning agent from the
+  table and re-dispatch it with the compiler error.
+
+Never substitute a different design (a different storage layer, an extra
+feature, renamed selectors) for what an agent was supposed to produce —
+the smoke test's Selector Contract and the Non-Goals list are binding, and
+a hand-substituted module silently breaks both.
+
 **Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa. Run every command from the repo root (the cloned `todos/` directory, where `package.json` lives) — not its parent — so `npm install` / `build` / `smoke` resolve the manifest without a `--prefix` and don't fire twice.
 
 #### Canonical `package.json`
 
-The main agent writes this verbatim in step 2. It is the single source
-of truth for the dependency surface and scripts; `spec/infrastructure/`
-records the *rules* it must satisfy but does not duplicate the block.
+**The canonical manifest is the checked-in file [`spec/package.json`](./package.json).**
+It is a real file, not a fenced block, precisely so it cannot drift from
+what the run installs and so a machine can check it. In step 2 the main
+agent **copies it to the repo root verbatim** — it does **not** author,
+re-type, or "modernize" one. `npm run verify` parses the repo-root
+`package.json` and the canonical `spec/package.json` and fails the run on
+any difference in `scripts`, `dependencies`, `devDependencies`, or the
+top-level fields, naming the exact key that differs.
 
-```json
-{
-  "name": "todos",
-  "private": true,
-  "version": "1.0.0",
-  "type": "module",
-  "scripts": {
-    "dev":         "vite",
-    "build":       "vite build",
-    "preview":     "vite preview --host 0.0.0.0 --port 41730 --strictPort",
-    "typecheck":   "tsc --noEmit",
-    "serve:phone": "node scripts/serve-phone.mjs",
-    "smoke":       "node scripts/smoke.mjs",
-    "clean":       "node scripts/free-port.mjs 41730"
-  },
-  "dependencies": {
-    "dexie":     "^4",
-    "react":     "^18",
-    "react-dom": "^18",
-    "ulid":      "^2"
-  },
-  "devDependencies": {
-    "@types/react":          "^18",
-    "@types/react-dom":      "^18",
-    "@vitejs/plugin-react":  "^4",
-    "autoprefixer":          "^10",
-    "postcss":               "^8",
-    "puppeteer-core":        "^25",
-    "qrcode-terminal":       "^0.12",
-    "tailwindcss":           "^3",
-    "typescript":            "^5",
-    "vite":                  "^5",
-    "vite-plugin-pwa":       "^0.20"
-  }
-}
-```
+Why a file and not a code block: the single most damaging way a run goes
+wrong is the main agent synthesizing a plausible-looking `package.json`
+from training priors (missing `dexie`/`ulid`, missing `qrcode-terminal` —
+the QR is the deliverable — or `puppeteer` instead of `puppeteer-core`).
+A buried block invites that; a checked-in file the run diffs against
+forecloses it. To change the dependency surface, edit `spec/package.json`
+**and** `spec/manifest.json` together — they are the contract `verify`
+enforces.
+
+The dependency surface it pins: 4 production (`dexie`, `react`,
+`react-dom`, `ulid`) + 11 development. The scripts: `dev`, `build`,
+`preview`, `typecheck`, `verify`, `serve:phone`, `smoke`, `clean`.
 
 ## MVP Cut
 

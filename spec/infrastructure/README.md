@@ -6,16 +6,19 @@
 ## package.json
 
 The **canonical `package.json`** — scripts plus the full pinned
-dependency list — lives in `spec/README.md` § "Canonical
-`package.json`", and the **main agent** writes it, not a module agent
+dependency list — is the **checked-in file `spec/package.json`**, and the
+**main agent** copies it to the repo root verbatim, not a module agent
 (it is the install manifest, written first so `npm install` can start
-at t=0; see `spec/README.md` § "Main-agent orchestration"). This
-section records the rules that block must satisfy; it does not
-duplicate it.
+at t=0; see `spec/README.md` § "Main-agent orchestration" and § "Canonical
+`package.json`"). It is a real file, not a fenced block, so `npm run
+verify` can diff the repo-root copy against it and reject a hand-authored
+substitute. This section records the rules that file must satisfy; it does
+not duplicate it.
 
 - **Scripts:** `dev`, `build`, `preview`
   (`vite preview --host 0.0.0.0 --port 41730 --strictPort`), `typecheck`
-  (`tsc --noEmit`), `serve:phone`, `smoke`, and `clean`
+  (`tsc --noEmit`), `verify` (`node spec/verify.mjs`; see § "File-set
+  verification"), `serve:phone`, `smoke`, and `clean`
   (`node scripts/free-port.mjs 41730`). `clean` is the manual
   port-reclaim escape hatch for the deliverable port; `serve:phone`
   frees 41730 automatically on start and `smoke` frees its own
@@ -511,10 +514,45 @@ The script is the contract between the spec and any implementer:
 selectors above are exact and must match `spec/frontend/README.md`
 § "Selector Contract" verbatim.
 
+## File-set verification — `npm run verify`
+
+`spec/verify.mjs` is a checked-in, dependency-free Node script (built-ins
+only, so it runs before `npm install` has even finished). It is the
+mechanical counterpart to the prose "Done when" columns in `spec/README.md`
+§ "The nine agents": instead of the main agent self-grading whether the
+right files exist, the run *proves* it. The main agent runs it as the first
+verify step, after the batch returns and the icons helper has run, before
+typecheck/build (`spec/README.md` § "Main-agent orchestration", step 5).
+
+It reads `spec/manifest.json` — the single list of every path a finished
+run must produce — and fails (exit 1, naming each problem) on:
+
+1. **A missing file** — a path in the manifest that does not exist. The
+   owning agent did not finish or wrote to the wrong path.
+2. **An unexpected source file** — any file under the scanned dirs
+   (`src/`, `scripts/`, `public/`) that is **not** in the manifest. This
+   is what catches an invented layout: a renamed component, a `components/`
+   or `state/` folder the partition never specified, an extra tsconfig.
+3. **A `package.json` mismatch** — the repo-root `package.json` differs
+   from `spec/package.json` in any script, dependency, devDependency, or
+   top-level field.
+
+This is distinct from `serve:phone`'s install pre-flight (§ "Install flow")
+and from `smoke.mjs` (§ "Smoke test"): `verify` is a static check of *what
+files exist and what the manifest says*, run before anything is built;
+those two exercise *runtime behaviour* against a live preview. They are
+complementary gates, not substitutes.
+
+`spec/manifest.json` and `spec/package.json` are the contract. When the
+partition in `spec/README.md` changes, update both alongside it — a stale
+manifest makes `verify` reject a correct run, and a stale `spec/package.json`
+lets a wrong dependency set through.
+
 ## Quality gates
 
 | Gate | Command | Required |
 |---|---|---|
+| File set | `npm run verify` (manifest + `package.json` match) | Must pass |
 | Types | `npm run typecheck` | Must pass |
 | Build | `npm run build` | Must pass |
 | Smoke | `npm run smoke` (boots and tears down its own preview) | Must pass |
@@ -540,6 +578,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
       - run: npm ci
+      - run: npm run verify  # manifest + package.json match
       - run: npm run typecheck
       - run: npm run build
       - run: npm run smoke   # boots and tears down its own preview

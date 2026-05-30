@@ -60,13 +60,19 @@ Open Claude Code in this directory and tell it:
 > ways so the heaviest work doesn't gate the batch), **spawn all nine
 > in a single message** with parallel Agent calls — this is REQUIRED,
 > not optional. You are
-> the orchestrator: the only file you write yourself is `package.json`
-> (the install manifest) — no source files. Each agent reads its own
-> sub-spec, writes its files, and reports back. Write `package.json`
-> first and kick `npm install` in the background immediately, before
-> spawning the agents, so it runs at t=0.
-> Verify with typecheck ∥ build (concurrent) → preview + `npm run
-> smoke` → `npm run serve:phone` printing the QR.
+> the orchestrator: the only file you write yourself is `package.json`,
+> and you write it by **copying `spec/package.json` verbatim** (do not
+> author one) — no source files. Each agent reads its own sub-spec,
+> writes its files, and reports back. Copy `spec/package.json` to the
+> repo root first and kick `npm install` in the background immediately,
+> before spawning the agents, so it runs at t=0.
+> The batch is **asynchronous**: wait for all nine agents to report — a
+> partial tree mid-run is normal, never start implementing a module
+> yourself, and if an agent fails, re-dispatch that agent (see
+> § "Recovery").
+> Verify with `npm run verify` (file-set + `package.json` check) →
+> typecheck ∥ build (concurrent) → `npm run smoke` →
+> `npm run serve:phone` printing the QR.
 
 The agent will write `src/`, `package.json`, the Vite/Tailwind/TS
 configs, `scripts/serve-phone.mjs`, and `scripts/smoke.mjs`. None of
@@ -141,6 +147,9 @@ spec/
   data/README.md             Dexie + repository (one table)
   frontend/README.md         one screen, grey + white palette, PWA
   infrastructure/README.md   build, serve:phone, smoke
+  manifest.json              the exact file set a finished run must produce
+  package.json               canonical install manifest (copied to repo root)
+  verify.mjs                 npm run verify: file-set + package.json check
 README.md                    this file
 .gitignore
 ```
