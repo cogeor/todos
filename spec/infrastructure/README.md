@@ -3,62 +3,31 @@
 > Build, dev loop, install flow, smoke test. Everything that isn't
 > source code but makes the app run.
 
-## package.json scripts
+## package.json
 
-```jsonc
-{
-  "scripts": {
-    "dev":         "vite",
-    "build":       "vite build",
-    "preview":     "vite preview --host 0.0.0.0 --port 4173 --strictPort",
-    "typecheck":   "tsc --noEmit",
-    "serve:phone": "node scripts/serve-phone.mjs",
-    "smoke":       "node scripts/smoke.mjs",
-    "clean":       "node scripts/free-port.mjs 4173"
-  }
-}
-```
+The **canonical `package.json`** — scripts plus the full pinned
+dependency list — lives in `spec/README.md` § "Canonical
+`package.json`", and the **main agent** writes it, not a module agent
+(it is the install manifest, written first so `npm install` can start
+at t=0; see `spec/README.md` § "Main-agent orchestration"). This
+section records the rules that block must satisfy; it does not
+duplicate it.
 
-`clean` frees port 4173 if a previous `serve:phone` / `smoke` left an
-orphan behind. It is the manual escape hatch; `serve:phone` and
-`smoke` also reclaim the port automatically on start (see § "Port
-reclaim — `free-port.mjs`"), so you rarely need to run it by hand.
-
-No `prebuild`. The PNG icons are not generated at build time — they
-are emitted by the `icons` agent's helper (`public/icons/make-icons.mjs`,
-specified verbatim in `spec/frontend/README.md` § "Icons"). The agent
-writes the helper once and runs it once. Nothing rasterizes during
-`npm run build`.
-
-## Dependencies
-
-```jsonc
-{
-  "dependencies": {
-    "dexie":     "^4",
-    "react":     "^18",
-    "react-dom": "^18",
-    "ulid":      "^2"
-  },
-  "devDependencies": {
-    "@types/react":          "^18",
-    "@types/react-dom":      "^18",
-    "@vitejs/plugin-react":  "^4",
-    "autoprefixer":          "^10",
-    "postcss":               "^8",
-    "puppeteer-core":        "^25",
-    "qrcode-terminal":       "^0.12",
-    "tailwindcss":           "^3",
-    "typescript":            "^5",
-    "vite":                  "^5",
-    "vite-plugin-pwa":       "^0.20"
-  }
-}
-```
-
-Pin majors; let minors and patches float. The total of 4 production
-and 11 development dependencies is the entire dependency surface for
-this product.
+- **Scripts:** `dev`, `build`, `preview`
+  (`vite preview --host 0.0.0.0 --port 4173 --strictPort`), `typecheck`
+  (`tsc --noEmit`), `serve:phone`, `smoke`, and `clean`
+  (`node scripts/free-port.mjs 4173`). `clean` is the manual
+  port-reclaim escape hatch; `serve:phone` and `smoke` also reclaim
+  4173 automatically on start (§ "Port reclaim — `free-port.mjs`"), so
+  you rarely need it by hand.
+- **Dependencies:** pin majors, let minors and patches float. 4
+  production (`dexie`, `react`, `react-dom`, `ulid`) + 11 development
+  is the entire dependency surface for this product.
+- **No `prebuild`.** The PNG icons are not generated at build time —
+  they are emitted by the `icons` agent's helper
+  (`public/icons/make-icons.mjs`, specified verbatim in
+  `spec/frontend/README.md` § "Icons"). The agent writes the helper
+  once and runs it once. Nothing rasterizes during `npm run build`.
 
 ## TypeScript
 

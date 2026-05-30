@@ -280,42 +280,66 @@ blocking trycloudflare, etc.) live in the root `README.md`
 
 ## Implementation Plan
 
-The work partitions into **six independent modules**. Each module is
-one agent. The six agents **parallelize** — they run concurrently,
-have no execution order between them, and never wait on each other.
-Within each module, the agent **fans out** its file writes: every
-file the module owns is emitted in a single message with parallel
-Write calls. There is no internal ordering inside a module either.
+The work partitions into **eight independent agents**. They
+**parallelize** — they run concurrently, have no execution order
+between them, and never wait on each other. Within each agent, it
+**fans out** its file writes: every file it owns is emitted in a
+single message with parallel Write calls. There is no internal
+ordering either.
+
+The partition is balanced for **wall-clock**, not just for tidy
+ownership. The batch finishes only when its *slowest* agent returns,
+so the two heaviest concerns — the UI screen and the install scripts —
+are each split across **two** agents instead of letting one long agent
+gate everything. `ui` splits into a **view** agent (markup + the
+binding Selector Contract) and a **state** agent (hooks + styles);
+`scripts` splits into a **serve-phone** agent and a **smoke** agent.
 
 **This is a spec, not code.** TypeScript only resolves at the verify
-step at the end of the run. Until then, every module is just files on
-disk in a separate folder. Two agents writing files in different
-folders cannot conflict, so they fan out concurrently.
+step at the end of the run. Until then, every agent is just files on
+disk. The conflict boundary is the **file**, not the folder: two
+agents writing *different files* — even in the same folder — cannot
+conflict. That is exactly what lets the heavy folders (`src/ui/`,
+`scripts/`) be split across more agents for more parallelism.
 
-The **main agent** does not write source files. It is the interactive
-coding agent the user opened in the repo (Claude Code or equivalent).
-Its job: read the spec, spawn the six module agents, kick `npm install`
-in the background, run the final verification chain, and run
+The **main agent** writes exactly one file — `package.json` — and no
+other. It is the interactive coding agent the user opened in the repo
+(Claude Code or equivalent). `package.json` is carved out of the
+"no-source-files" rule deliberately: it is the install manifest, not
+application code, and it is the sole file gating `npm install` — the
+longest fixed cost in the run. The main agent writing it **first** is
+what lets install overlap the entire agent batch (see § "Main-agent
+orchestration", step 2). Everything else — all of `src/`, the other
+root configs, `scripts/`, `public/` — belongs to the module agents.
+Beyond `package.json`, the main agent's job is: read the spec, write
+`package.json` and kick `npm install` in the background, spawn the
+module agents, run the final verification chain, and run
 `npm run serve:phone` so the QR appears in its own terminal — in
 contact with the user. Subagents do not run `serve:phone`. This is a
-hard rule. A run where the main agent wrote the source files itself
-has failed the orchestration contract even if every gate passes and
-the QR prints.
+hard rule. A run where the main agent wrote any *source* file (anything
+beyond `package.json`) has failed the orchestration contract even if
+every gate passes and the QR prints.
 
-### The six modules
+### The eight agents
 
 | Agent | Owns | Files | Reads | Done when |
 |---|---|---|---|---|
 | **domain** | `src/domain/` | `errors.ts`, `ids.ts`, `types.ts`, `rules.ts`, `index.ts` (5) | `spec/domain/README.md` | All 5 exist. Barrel re-exports the other four. Zero DOM / React / Dexie imports. |
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | `spec/data/README.md` + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
-| **ui** | `src/App.tsx`, `src/main.tsx`, `src/ui/` | `App.tsx`, `main.tsx`, `ui/styles.css`, `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/todo-row.tsx`, `ui/todo-form.tsx`, `ui/todo-app.tsx` (8) | `spec/frontend/README.md` (whole file; Selector Contract is binding) | All 8 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. |
-| **scripts** | `scripts/` | `serve-phone.mjs`, `smoke.mjs`, `free-port.mjs` (3) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | All three exist. `free-port.mjs` exports `reclaimPort(port)` (reclaims a port held by *our own* prior run; foreign listener left untouched). `serve-phone.mjs` = reclaim + build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` reclaims, **boots and tears down its own preview**, and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
+| **ui-view** | `src/App.tsx`, `src/main.tsx`, `src/ui/*.tsx` | `App.tsx`, `main.tsx`, `ui/todo-app.tsx`, `ui/todo-row.tsx`, `ui/todo-form.tsx` (5) | `spec/frontend/README.md` (whole file; Selector Contract is binding) | All 5 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. Imports the hooks + styles owned by **ui-state**. |
+| **ui-state** | `src/ui/` hooks + styles | `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/styles.css` (3) | `spec/frontend/README.md` (§ hooks, § styles, § install button) | All 3 exist. `use-todos` exposes list/create/setStatus/delete; `use-install-prompt` exposes `{ canInstall, promptInstall }`; `styles.css` has the Tailwind directives + the CSS variables the tokens resolve against. |
+| **serve-phone** | `scripts/serve-phone.mjs`, `scripts/free-port.mjs` | `serve-phone.mjs`, `free-port.mjs` (2) | `spec/infrastructure/README.md` | Both exist. `free-port.mjs` exports `reclaimPort(port)` (reclaims a port held by *our own* prior run; foreign listener left untouched). `serve-phone.mjs` = reclaim + build + pre-flight + cloudflared + exactly one QR print. |
+| **smoke** | `scripts/smoke.mjs` | `smoke.mjs` (1) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Exists. Reclaims 4173, **boots and tears down its own preview**, imports `reclaimPort` from `free-port.mjs`, and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
 | **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | `spec/frontend/README.md` § Icons | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
-| **configs** | repo root | `package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (6) | `spec/README.md`, `spec/infrastructure/README.md` | All 6 exist. `package.json` dependency list matches the infrastructure spec exactly. |
+| **configs** | repo root | `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (5) | `spec/infrastructure/README.md` | All 5 exist. (`package.json` is **not** here — the main agent writes it; see § "Main-agent orchestration", step 2.) |
 
-**Total: 27 files across 6 parallel agents.** (The icons module
-writes 1 helper plus 2 generated PNGs; only the helper is an agent
-Write.)
+**Total: 28 files — 27 across the eight parallel module agents, plus
+`package.json` written by the main agent.** (The icons agent writes 1
+helper plus 2 generated PNGs; only the helper is an agent Write.)
+
+The split pairs (`ui-view`/`ui-state`, `serve-phone`/`smoke`) share an
+import edge but never a file, so they fan out with zero conflict risk;
+imports resolve at the verify step like every other cross-agent edge.
 
 ### Main-agent orchestration
 
@@ -330,15 +354,20 @@ Write.)
    collapses the parallel dispatch this plan exists to produce. If you
    have already read a sub-spec, you must **still** dispatch its agent
    — do not implement it inline.
-2. **Spawn the modules.** In one message, spawn all 6 module agents
+2. **Write `package.json`, then start install at t=0.** Before
+   spawning any agent, the main agent writes `package.json` itself from
+   the canonical block below — a fixed, pinned transcription with no
+   design decisions — and immediately kicks `npm install` as a
+   background command. Because the manifest already exists, install
+   begins at t=0 and runs concurrently with every module agent: no
+   poll, no `ENOENT` race, no dependence on harness file-watch timing.
+   This is the only file the main agent writes.
+3. **Spawn the agents.** In one message, spawn all eight module agents
    with parallel Agent calls. Hand each agent its row from the table
    above.
-3. **Install in the background.** The moment `package.json` exists on
-   disk, kick `npm install` as a background command. It takes 30–90 s
-   and runs concurrently with the module agents. If the harness can't
-   watch for the file landing, kick `npm install` immediately after
-   step 2 — it waits for `package.json` to appear on its own.
-4. **Wait** for all 6 module agents and `npm install` to return.
+4. **Wait** for all eight module agents and `npm install` to return.
+   With install started at step 2 it is normally already done by the
+   time the agents return.
 5. **Verify — concurrent.** In one message, run `npm run typecheck`
    and `npm run build`. Both must pass. This is where the modules
    connect: any cross-module type mismatch surfaces here, not at
@@ -361,6 +390,49 @@ Write.)
    See § "Deliverable".
 
 **Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa.
+
+#### Canonical `package.json`
+
+The main agent writes this verbatim in step 2. It is the single source
+of truth for the dependency surface and scripts; `spec/infrastructure/`
+records the *rules* it must satisfy but does not duplicate the block.
+
+```json
+{
+  "name": "todos",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev":         "vite",
+    "build":       "vite build",
+    "preview":     "vite preview --host 0.0.0.0 --port 4173 --strictPort",
+    "typecheck":   "tsc --noEmit",
+    "serve:phone": "node scripts/serve-phone.mjs",
+    "smoke":       "node scripts/smoke.mjs",
+    "clean":       "node scripts/free-port.mjs 4173"
+  },
+  "dependencies": {
+    "dexie":     "^4",
+    "react":     "^18",
+    "react-dom": "^18",
+    "ulid":      "^2"
+  },
+  "devDependencies": {
+    "@types/react":          "^18",
+    "@types/react-dom":      "^18",
+    "@vitejs/plugin-react":  "^4",
+    "autoprefixer":          "^10",
+    "postcss":               "^8",
+    "puppeteer-core":        "^25",
+    "qrcode-terminal":       "^0.12",
+    "tailwindcss":           "^3",
+    "typescript":            "^5",
+    "vite":                  "^5",
+    "vite-plugin-pwa":       "^0.20"
+  }
+}
+```
 
 ## MVP Cut
 
