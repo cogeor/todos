@@ -48,12 +48,18 @@ Open Claude Code in this directory and tell it:
 > code printed by `npm run serve:phone`. Do not declare success until
 > that QR is on screen.**
 >
-> Read all 5 files under `spec/` in **one message** (parallel Reads).
-> Do NOT read any `.md` at repo root other than this one — they are
-> not for implementers.
+> Read **only** `spec/README.md` — nothing else. Do **not** read the
+> per-folder sub-specs (`spec/domain`, `spec/data`, `spec/frontend`,
+> `spec/infrastructure`); each module agent reads its own. Do NOT read
+> any `.md` at repo root other than this one — they are not for
+> implementers. Keeping your context tight at spawn time is what lets
+> the six agents do the real work in parallel.
 >
 > Then follow `spec/README.md` § "Implementation Plan": six modules,
-> one agent per module, **spawn all six in a single message**. Kick
+> one agent per module, **spawn all six in a single message** with
+> parallel Agent calls — this is REQUIRED, not optional. You are the
+> orchestrator: you do **not** write source files yourself. Each agent
+> reads its own sub-spec, writes its files, and reports back. Kick
 > `npm install` in the background the moment `package.json` lands.
 > Verify with typecheck ∥ build (concurrent) → preview + `npm run
 > smoke` → `npm run serve:phone` printing the QR.

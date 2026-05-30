@@ -10,7 +10,7 @@
   "scripts": {
     "dev":         "vite",
     "build":       "vite build",
-    "preview":     "vite preview --host 0.0.0.0 --port 4173",
+    "preview":     "vite preview --host 0.0.0.0 --port 4173 --strictPort",
     "typecheck":   "tsc --noEmit",
     "serve:phone": "node scripts/serve-phone.mjs",
     "smoke":       "node scripts/smoke.mjs"
@@ -19,7 +19,7 @@
 ```
 
 No `prebuild`. The PNG icons are not generated at build time — they
-are emitted by the `icons` agent's helper (`scripts/make-icons.mjs`,
+are emitted by the `icons` agent's helper (`public/icons/make-icons.mjs`,
 specified verbatim in `spec/frontend/README.md` § "Icons"). The agent
 writes the helper once and runs it once. Nothing rasterizes during
 `npm run build`.
@@ -117,7 +117,7 @@ export default defineConfig({
 
 `scripts/` does not own icon generation. The two PNGs Chrome's
 installability check requires (`/icons/icon-192.png`,
-`/icons/icon-512.png`) are emitted by `scripts/make-icons.mjs`, a
+`/icons/icon-512.png`) are emitted by `public/icons/make-icons.mjs`, a
 pure-Node helper specified in full in `spec/frontend/README.md`
 § "Icons". The `icons` agent writes the helper once from the spec
 and runs it once. No `prebuild` hook, no puppeteer rasterization, no
@@ -188,9 +188,19 @@ material.
    user may have edited the spec since the last run — never serve a
    stale `dist/`.
 2. **Boot preview.** `spawn('npm', ['run', 'preview'])` (the project's
-   own preview script, so port/host stay consistent).
+   own preview script, so port/host stay consistent). The preview
+   script runs `vite preview --port 4173 --strictPort` so an occupied
+   port is a hard error instead of a silent bump to 4174. Watch the
+   preview child's stdout; if it emits `Port 4173 is in use` (or never
+   reports listening on 4173 within the timeout), abort with
+   `[serve:phone] pre-flight failed: port 4173 is occupied by another
+   process — stop it and retry` and never open the tunnel. The tunnel
+   and pre-flight target the same port the preview actually bound.
 3. **Wait for localhost.** Poll `http://localhost:4173/` with `fetch`
-   until it returns 200. Time out at 30 s with a clear error.
+   until it returns 200. Time out at 30 s with a clear error. Scan the
+   preview child's stdout for the `localhost:4173` ready line; treat a
+   `Port 4173 is in use` line (or a 30 s timeout without the ready
+   line) as a pre-flight failure per step 2.
 4. **Pre-flight.** Run, against `http://localhost:4173`, in order:
    - **`GET /`** → 200, body contains `<link rel="manifest"`.
    - **`GET /manifest.webmanifest`** → 200, response is JSON, parsed
@@ -222,8 +232,21 @@ material.
      Android: Chrome → Install banner, or menu → Install app
      ```
 8. Forward all child output to this process's stdout/stderr.
-9. On `SIGINT` / `SIGTERM`: send `SIGTERM` to both children, then
-   exit.
+9. **Teardown — kill the whole tree.** Spawn the preview and tunnel so
+   the whole tree can be torn down: track each child's PID. On `SIGINT`
+   / `SIGTERM` (and on any fatal path that calls the script's
+   `fail()`), kill the **process tree**, not just the direct child:
+   - **Windows:** `spawn('taskkill', ['/pid', String(child.pid), '/T',
+     '/F'])` — `/T` kills the child and all descendants.
+   - **POSIX:** spawn the child with `detached: true`, then
+     `process.kill(-child.pid, 'SIGTERM')` to signal the whole process
+     group.
+
+   The intended stop is **Ctrl-C in the foreground terminal**; after
+   it, no `vite`/`cloudflared`/`node` process from this run remains and
+   ports 4173/4174 are free. A run that leaves an orphan holding 4173
+   is a teardown failure — it silently breaks the *next* `serve:phone`
+   (it is the trigger for the wrong-port bug in step 2).
 
 The script must work on Windows (PowerShell), macOS, and Linux. Use
 `shell: true` when spawning `npm run preview` and `npm run build` so

@@ -296,7 +296,10 @@ coding agent the user opened in the repo (Claude Code or equivalent).
 Its job: read the spec, spawn the six module agents, kick `npm install`
 in the background, run the final verification chain, and run
 `npm run serve:phone` so the QR appears in its own terminal — in
-contact with the user. Subagents do not run `serve:phone`.
+contact with the user. Subagents do not run `serve:phone`. This is a
+hard rule. A run where the main agent wrote the source files itself
+has failed the orchestration contract even if every gate passes and
+the QR prints.
 
 ### The six modules
 
@@ -322,6 +325,10 @@ Write.)
    lazily, on demand, only if verification fails or a subagent
    reports a question that the central spec does not answer. The
    point is to keep the main agent's context tight at spawn time.
+   Reading a sub-spec up front is a defect, not a shortcut: it
+   collapses the parallel dispatch this plan exists to produce. If you
+   have already read a sub-spec, you must **still** dispatch its agent
+   — do not implement it inline.
 2. **Spawn the modules.** In one message, spawn all 6 module agents
    with parallel Agent calls. Hand each agent its row from the table
    above.
@@ -342,8 +349,11 @@ Write.)
    harness that captures output. The script's stdout *is* the QR;
    backgrounding it means the QR never reaches the user's terminal.
    The main agent stays attached to the script until the user
-   terminates it with Ctrl-C. **Do not declare success until the user
-   has confirmed the QR is on screen.** See § "Deliverable".
+   terminates it with Ctrl-C. The main agent launches `serve:phone`
+   itself and surfaces the printed QR; it does **not** hand this step
+   to the user. The process stays running (tunnel up) until the user
+   terminates it. **Do not declare success until the QR is on screen.**
+   See § "Deliverable".
 
 ## MVP Cut
 

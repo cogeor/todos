@@ -377,19 +377,19 @@ every transcription risk a richer mark would introduce.
 
 #### How the PNGs land on disk
 
-The icons agent writes one file — `scripts/make-icons.mjs` (verbatim
-from the code block below) — then runs `node scripts/make-icons.mjs`.
+The icons agent writes one file — `public/icons/make-icons.mjs` (verbatim
+from the code block below) — then runs `node public/icons/make-icons.mjs`.
 The script emits both PNGs at the canonical paths and exits. No
 dependency, no rasterizer, no base64. The PNGs are pure Node output:
 PNG signature + IHDR (grayscale, 8-bit) + zlib-deflated IDAT scanlines
 + IEND, with a 256-entry CRC32 table computed inline.
 
 ```js
-// scripts/make-icons.mjs
+// public/icons/make-icons.mjs
 //
 // Pure-Node PNG writer for two solid-color icons. Reads nothing,
 // pulls no rasterizer dependency. The icons agent writes this file
-// from the spec, then runs `node scripts/make-icons.mjs`. The two
+// from the spec, then runs `node public/icons/make-icons.mjs`. The two
 // PNGs land at `public/icons/icon-192.png` and
 // `public/icons/icon-512.png`.
 
@@ -461,9 +461,9 @@ them.
 
 #### What the icons agent does
 
-1. Write `scripts/make-icons.mjs` to disk, verbatim from the block
+1. Write `public/icons/make-icons.mjs` to disk, verbatim from the block
    above.
-2. Run `node scripts/make-icons.mjs` once. The PNGs appear at
+2. Run `node public/icons/make-icons.mjs` once. The PNGs appear at
    `public/icons/icon-192.png` and `public/icons/icon-512.png`.
 3. Exit.
 
