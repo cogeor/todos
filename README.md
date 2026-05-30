@@ -82,7 +82,7 @@ npm run build
 npm run serve:phone
 ```
 
-`serve:phone` boots a local preview at `http://localhost:4173`, opens
+`serve:phone` boots a local preview at `http://localhost:41730`, opens
 a Cloudflare tunnel to it, and prints a QR code in the terminal whose
 payload is the public `https://*.trycloudflare.com` URL.
 
@@ -112,7 +112,7 @@ can be shut down and the app keeps working offline on the phone.
   captive-portal Wi-Fi networks block `*.trycloudflare.com`. Switch
   to mobile data.
 - **No install prompt even though the URL loads.** PWAs need HTTPS.
-  A raw LAN address like `http://192.168.x.x:4173` won't prompt —
+  A raw LAN address like `http://192.168.x.x:41730` won't prompt —
   always go through the tunnel.
 - **`npm run dev` shows no install banner.** The service worker is
   disabled in dev (`devOptions.enabled: false`). Use

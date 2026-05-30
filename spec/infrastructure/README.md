@@ -14,13 +14,16 @@ section records the rules that block must satisfy; it does not
 duplicate it.
 
 - **Scripts:** `dev`, `build`, `preview`
-  (`vite preview --host 0.0.0.0 --port 4173 --strictPort`), `typecheck`
+  (`vite preview --host 0.0.0.0 --port 41730 --strictPort`), `typecheck`
   (`tsc --noEmit`), `serve:phone`, `smoke`, and `clean`
-  (`node scripts/free-port.mjs 4173`). `clean` is the manual
+  (`node scripts/free-port.mjs 41730`). `clean` is the manual
   port-reclaim escape hatch for the deliverable port; `serve:phone`
-  reclaims 4173 automatically on start and `smoke` reclaims its own
-  port 4273 (§ "Port reclaim — `free-port.mjs`"), so you rarely need it
-  by hand.
+  frees 41730 automatically on start and `smoke` frees its own
+  port 42730 (§ "Port reclaim — `free-port.mjs`"), so you rarely need it
+  by hand. **Ports 41730 (serve) and 42730 (smoke) are project-reserved
+  and deliberately not Vite's defaults (5173 dev, 4173 preview)** — that
+  is what lets `free-port` treat any listener on them as a stale prior
+  run, with no need to fingerprint the process (§ "Port reclaim").
 - **Dependencies:** pin majors, let minors and patches float. 4
   production (`dexie`, `react`, `react-dom`, `ulid`) + 11 development
   is the entire dependency surface for this product.
@@ -76,7 +79,7 @@ export default defineConfig({
   server:  { host: '0.0.0.0', port: 5173 },
   preview: {
     host: '0.0.0.0',
-    port: 4173,
+    port: 41730,
     // Vite 5 preview rejects unknown Host headers by default. The
     // cloudflared tunnel rewrites the Host to *.trycloudflare.com,
     // which would trip "Blocked request. This host is not allowed."
@@ -139,7 +142,7 @@ above resolve to whichever side of the media query is active.
 ## Install flow — `serve:phone`
 
 `scripts/serve-phone.mjs` is the **only** install-flow orchestrator
-(it may import the shared `reclaimPort` helper from `free-port.mjs`).
+(it imports the shared `freePort` helper from `free-port.mjs`).
 It contains the orchestration, the pre-flight validation, and the QR
 print. There is no second test script. If the QR prints, the install
 path is good; if any pre-flight check fails, the QR never prints and
@@ -172,80 +175,75 @@ material.
 
 ### Port reclaim — `free-port.mjs`
 
-`scripts/free-port.mjs` exports `reclaimPort(port)` and also runs as a
-CLI (`node scripts/free-port.mjs 4173`, wired to `npm run clean`).
-`reclaimPort` is a **parameterised** helper — the port is an argument,
-not a hard-coded constant — so each caller reclaims only its own port.
+`scripts/free-port.mjs` exports `freePort(port)` and also runs as a
+CLI (`node scripts/free-port.mjs 41730`, wired to `npm run clean`).
+`freePort` is a **parameterised** helper — the port is an argument,
+not a hard-coded constant — so each caller frees only its own port.
 
-**Port 4173 is reclaimed in exactly one place: `serve-phone.mjs`, as
-its first action.** `serve-phone.mjs` is the single install-flow
-orchestrator and is run only by the main agent as the **last** step of
-a run, so all handling of the deliverable port lives at the end of the
-run, in the one step that owns serving. `smoke.mjs` does **not** touch
-4173 at all — it runs against its own dedicated port **4273** (§ "Smoke
-test"), reclaiming `reclaimPort(4273)` as its first action. Decoupling
-the ports means the smoke gate and the final serve can never contend
-for the same port, and a stale smoke preview can never orphan the
-deliverable port.
+**The ports are project-reserved (41730 serve, 42730 smoke), so any
+listener is a stale prior run.** Because these are uncommon, fixed
+ports — *not* Vite's shared defaults (5173 dev, 4173 preview) — nothing
+else on the machine is expected to bind them. `freePort` therefore does
+**not** fingerprint the process ("is this one *ours*?"). It frees the
+port and lets the caller proceed. This is the whole simplification: the
+old `reclaimPort` spawned a PowerShell `Get-CimInstance` per PID and ran
+a `vite`/`cloudflared`/project-path heuristic purely to avoid killing an
+unrelated app on the *shared* default port 4173. Reserving distinctive
+ports removes that need, and with it the per-PID process inspection, the
+`{ reclaimed, foreign, free }` contract, and the `foreign`-vs-`free`
+branching footgun.
 
-`reclaimPort(port)`:
+**41730 is freed in exactly one place: `serve-phone.mjs`, as its first
+action.** It is the single install-flow orchestrator, run by the main
+agent as the **last** step of a run, so all handling of the deliverable
+port lives at the end, in the one step that owns serving. `smoke.mjs`
+does **not** touch 41730 — it runs against its own dedicated port
+**42730** (§ "Smoke test"), calling `freePort(42730)` as its first
+action. Decoupling the ports means the smoke gate and the final serve
+can never contend for the same port.
 
-1. Finds the PID(s) listening on `port`. Windows: parse `netstat -ano`
-   (or `Get-NetTCPConnection`); POSIX: `lsof -ti tcp:<port>` (fall back
-   to `fuser -k <port>/tcp`).
-2. For each PID, inspects its command line. If it is **ours** — a
-   `vite preview`, a `cloudflared` tunnel, or a `node` process running
-   under this project path — kill the whole **tree** (`taskkill /pid
-   <pid> /T /F` on Windows; process-group `kill` on POSIX).
-3. If the listener is **not** ours, leave it untouched and return a
-   "foreign process on `<port>`" result. The caller aborts with the
-   usual pre-flight message instead of killing an unrelated app.
-4. No-op and silent when the port is already free.
+`freePort(port)` — returns `Promise<boolean>` (`true` once the port is
+bindable, `false` if something still holds it):
 
-**Return value — pinned contract.** `reclaimPort` is written by the
-`free-port` agent and imported by both `serve-phone` and `smoke`, so
-its return shape is a hard cross-agent contract, not an implementation
-detail. It returns, **exactly**:
+1. **Probe first (cheap, common case).** Try to bind the port in-process
+   (`net.createServer().listen({ port, host: '0.0.0.0' })`). If it binds,
+   close it and return `true` immediately — **no subprocess is spawned
+   when the port is already free.** This is the dominant path.
+2. **Only if occupied:** find the listener PID(s). Windows: parse
+   `netstat -ano -p TCP` (exact-port match on the LISTENING rows); POSIX:
+   `lsof -ti tcp:<port> -sTCP:LISTEN`.
+3. Kill each PID's whole **tree** — `taskkill /pid <pid> /T /F` on
+   Windows; process-group `SIGKILL` on POSIX. Log each killed PID
+   (`[free-port] killing pid <pid> on :<port>`) so the action is visible.
+4. Poll the bind-probe (≈100 ms × up to ~3 s) until the socket releases.
+   Return `true` when bindable, `false` on timeout.
 
-```ts
-{ reclaimed: number[], foreign: number[], free: boolean }
-```
-
-- `reclaimed` — PIDs that were ours and got killed (may be empty).
-- `foreign` — PIDs of non-ours listeners left untouched (may be empty).
-- `free` — `true` iff the port is now bindable (no listener, or only
-  ours and we killed it). This is `foreign.length === 0`.
-
-**Callers branch on `free` only.** The correct guard is:
+**Callers guard on the boolean.** The correct usage is:
 
 ```js
-const result = await reclaimPort(PORT)
-if (!result.free) {
-  // a foreign process still holds the port — abort with the pre-flight message
+if (!(await freePort(PORT))) {
+  // something still holds the port — abort with the pre-flight message
 }
 ```
 
-Do **not** branch on `foreign` (or `reclaimed`) for truthiness: in
-JavaScript an empty array `[]` is **truthy**, so `if (result.foreign)`
-is *always* true and aborts even when the port is free. Branching on
-the boolean `free` is the only correct test. (This exact mistake — a
-caller testing `if (result.foreign)` against a free port — is why the
-shape is pinned here rather than left for each importer to infer.)
+There is no array to misread; the single boolean is the whole contract.
 
 This is what makes `--strictPort` safe to keep: a stale preview from a
-prior run is reclaimed automatically, while a genuinely foreign
-process on 4173 still produces the clear hard error. **Reclaim-on-start,
-not teardown-on-exit, is the durable fix** — it does not depend on the
+prior run is freed automatically before the bind, and if `freePort` ever
+*can't* clear the port, the subsequent `vite preview --strictPort` fails
+fast with `Port <n> is in use` — that hard error **is** the fallback, so
+the script never silently bumps to the next port. **Free-on-start, not
+teardown-on-exit, is the durable fix** — it does not depend on the
 previous run having shut down cleanly (a hard kill, a closed terminal,
-or a closed editor / agent session all skip exit teardown; the next
-run reclaims regardless).
+or a closed editor / agent session all skip exit teardown; the next run
+frees the port regardless).
 
 ### Behaviour
 
-0. **Reclaim the port.** Before anything else, `await
-   reclaimPort(4173)` (§ "Port reclaim"). After this, 4173 is either
-   free or held by a foreign process; in the latter case abort
-   immediately with `[serve:phone] pre-flight failed: port 4173 is
+0. **Free the port.** Before anything else, `if (!(await
+   freePort(41730))) abort` (§ "Port reclaim"). After this, 41730 is
+   bindable; if `freePort` returned `false` something still holds it, so
+   abort immediately with `[serve:phone] pre-flight failed: port 41730 is
    occupied by another process — stop it and retry` and never build or
    open the tunnel.
 1. **Build.** Always run `npm run build` as a subprocess and wait
@@ -255,20 +253,20 @@ run reclaims regardless).
    stale `dist/`.
 2. **Boot preview.** `spawn('npm', ['run', 'preview'])` (the project's
    own preview script, so port/host stay consistent). The preview
-   script runs `vite preview --port 4173 --strictPort` so an occupied
-   port is a hard error instead of a silent bump to 4174. Step 0
-   already reclaimed any orphan of *ours*, so if the preview child
-   still emits `Port 4173 is in use` (or never reports listening on
-   4173 within the timeout), the occupant is foreign; abort with
-   `[serve:phone] pre-flight failed: port 4173 is occupied by another
-   process — stop it and retry` and never open the tunnel. The tunnel
-   and pre-flight target the same port the preview actually bound.
-3. **Wait for localhost.** Poll `http://localhost:4173/` with `fetch`
+   script runs `vite preview --port 41730 --strictPort` so an occupied
+   port is a hard error instead of a silent bump to the next port. Step
+   0 already freed the port, so if the preview child still emits `Port
+   41730 is in use` (or never reports listening on 41730 within the
+   timeout), abort with `[serve:phone] pre-flight failed: port 41730 is
+   occupied by another process — stop it and retry` and never open the
+   tunnel. The tunnel and pre-flight target the same port the preview
+   actually bound.
+3. **Wait for localhost.** Poll `http://localhost:41730/` with `fetch`
    until it returns 200. Time out at 30 s with a clear error. Scan the
-   preview child's stdout for the `localhost:4173` ready line; treat a
-   `Port 4173 is in use` line (or a 30 s timeout without the ready
+   preview child's stdout for the `localhost:41730` ready line; treat a
+   `Port 41730 is in use` line (or a 30 s timeout without the ready
    line) as a pre-flight failure per step 2.
-4. **Pre-flight.** Run, against `http://localhost:4173`, in order:
+4. **Pre-flight.** Run, against `http://localhost:41730`, in order:
    - **`GET /`** → 200, body contains `<link rel="manifest"`.
    - **`GET /manifest.webmanifest`** → 200, response is JSON, parsed
      manifest contains:
@@ -282,7 +280,7 @@ run reclaims regardless).
      send `SIGTERM` to the preview child, exit code 1. Do not start
      the tunnel.
 5. **Boot tunnel.** `spawn('cloudflared', ['tunnel', '--url',
-   'http://localhost:4173'])`.
+   'http://localhost:41730'])`.
 6. **Capture URL.** Pipe cloudflared's stdout and stderr. On each
    line, test against the regex
    `https:\/\/[a-z0-9.-]+\.trycloudflare\.com`. On the first match,
@@ -311,14 +309,14 @@ run reclaims regardless).
 
    The intended stop is **Ctrl-C in the foreground terminal**; after
    it, no `vite`/`cloudflared`/`node` process from this run remains and
-   ports 4173/4174 are free.
+   port 41730 is free.
 
-   **Exit teardown is best-effort; reclaim-on-start is the guarantee.**
+   **Exit teardown is best-effort; free-on-start is the guarantee.**
    A hard kill of this process — or closing the terminal, editor, or
    agent session that owns it — skips these handlers, and on Windows
    the `vite`/`cloudflared` grandchildren are not in a kill-on-close
-   job, so they can survive as orphans holding 4173. That is tolerated:
-   step 0's `reclaimPort` clears them on the next run before binding.
+   job, so they can survive as orphans holding 41730. That is tolerated:
+   step 0's `freePort` clears them on the next run before binding.
    Do **not** rely on exit teardown alone to keep successive runs
    unblocked — that is exactly the assumption that left the port busy
    before.
@@ -343,7 +341,7 @@ removed because:
 - The implementer would write two install-flow scripts in a one-shot
   run instead of one.
 - The checks it ran (manifest reachable, icons 200, root references
-  manifest) all pass identically against `localhost:4173` — there is
+  manifest) all pass identically against `localhost:41730` — there is
   no `trycloudflare.com`-specific failure mode that matters at this
   scope (service-worker registration works on `localhost` and on
   HTTPS tunnel equally).
@@ -359,13 +357,13 @@ can be reintroduced. Until then, one script is enough.
 
 The smoke test is the verification oracle for success criteria #1–#9
 in `spec/README.md`. It **owns its own preview lifecycle on a dedicated
-port — 4273, never 4173**: on start it `await reclaimPort(4273)`,
-spawns its own preview bound to 4273 (`vite preview --host 0.0.0.0
---port 4273 --strictPort` directly — *not* `npm run preview`, which is
-hard-wired to the deliverable port 4173), waits for 4273 to answer 200,
-runs the puppeteer steps below, and on exit (success, failure, or
-signal) tears the preview down with the same tree-kill as
-`serve-phone.mjs`. It never reclaims or binds 4173 — the deliverable
+port — 42730, never 41730**: on start it `if (!(await freePort(42730)))
+abort`, spawns its own preview bound to 42730 (`vite preview --host
+0.0.0.0 --port 42730 --strictPort` directly — *not* `npm run preview`,
+which is hard-wired to the deliverable port 41730), waits for 42730 to
+answer 200, runs the puppeteer steps below, and on exit (success,
+failure, or signal) tears the preview down with the same tree-kill as
+`serve-phone.mjs`. It never frees or binds 41730 — the deliverable
 port belongs to the final serve step alone (§ "Port reclaim"). The
 orchestrator must **not** start a preview for it — there is no
 `npm run preview &` step, and that stray ampersand was the orphan that
@@ -379,15 +377,16 @@ contract disagree, the contract wins and the script is wrong.
 
 Behaviour:
 
-0. `await reclaimPort(4273)`, then spawn `vite preview --host 0.0.0.0
-   --port 4273 --strictPort`, poll `http://localhost:4273/` until 200
-   (30 s timeout), and register a tree-kill teardown that fires on
-   every exit path. (Port 4273, never 4173 — see § "Port reclaim".)
+0. `if (!(await freePort(42730))) abort`, then spawn `vite preview
+   --host 0.0.0.0 --port 42730 --strictPort`, poll
+   `http://localhost:42730/` until 200 (30 s timeout), and register a
+   tree-kill teardown that fires on every exit path. (Port 42730, never
+   41730 — see § "Port reclaim".)
 1. Launch `puppeteer-core` against the system Chrome.
    Default path on Windows:
    `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`.
    Override with `CHROME_PATH`.
-2. `page.goto('http://localhost:4273')`.
+2. `page.goto('http://localhost:42730')`.
 3. Delete IndexedDB `todos-app` and reload, so each run is
    deterministic.
 4. Wait for the Add button (see Selector Contract).

@@ -85,8 +85,8 @@ unverified, you skipped the gates.
    scan and the app will load, but the "Install app" affordance
    never appears. PNG is mandatory; SVG is fine as a supplementary
    `<link rel="icon">` and apple-touch-icon.
-9. `node scripts/smoke.mjs` — which reclaims its own dedicated port
-   4273 (never 4173) and boots and tears down its own preview server
+9. `node scripts/smoke.mjs` — which frees its own dedicated port
+   42730 (never 41730) and boots and tears down its own preview server
    there — adds, completes, and deletes a todo. Exit code 0.
 10. `npm run serve:phone` produces exactly one terminal QR and one
     `https://*.trycloudflare.com` URL underneath it. The script
@@ -257,7 +257,7 @@ npm run serve:phone
 
 1. Always runs `npm run build` first. The user may have edited the
    spec since the last run — never serve a stale `dist/`.
-2. Boots `vite preview` on port 4173.
+2. Boots `vite preview` on port 41730.
 3. Polls until the local server responds.
 4. **Pre-flight:** fetches `/`, `/manifest.webmanifest`, and every
    icon URL from the manifest. All must return 200, the manifest must
@@ -265,7 +265,7 @@ npm run serve:phone
    any pre-flight check fails, the script aborts with a one-line
    message and never opens the tunnel — there is no broken QR to
    scan.
-5. Boots `cloudflared tunnel --url http://localhost:4173`.
+5. Boots `cloudflared tunnel --url http://localhost:41730`.
 6. Watches cloudflared's stdout for a `https://*.trycloudflare.com`
    URL. Captures the first one.
 7. Renders that URL as a terminal QR via `qrcode-terminal`, prints
@@ -314,12 +314,13 @@ into a **view** agent (markup + the binding Selector Contract) and a
 **state** agent (hooks + styles). `scripts` splits **three** ways:
 `free-port` owns the shared `free-port.mjs` helper, `serve-phone` owns
 the install-flow orchestrator, and `smoke` owns the test. Carving
-`free-port` out matters twice over: it was the longest single agent's
-extra file (so splitting it shortens the long pole), and it is the one
-file *imported by two other agents* — giving the `reclaimPort` contract
-a single owner instead of leaving it implicit across `serve-phone` and
-`smoke` (see `spec/infrastructure/README.md` § "Port reclaim", which
-pins that contract's return shape).
+`free-port` out gives the one file *imported by two other agents* a
+single owner instead of leaving the `freePort` helper implicit across
+`serve-phone` and `smoke` (see `spec/infrastructure/README.md`
+§ "Port reclaim"). The helper itself is small — a bind-probe plus a
+kill-the-listener fallback on project-reserved ports — so this agent is
+no longer the long pole; it must **not** pad its runtime by spinning up
+live servers to test itself.
 
 **This is a spec, not code.** TypeScript only resolves at the verify
 step at the end of the run. Until then, every agent is just files on
@@ -354,9 +355,9 @@ every gate passes and the QR prints.
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | `spec/data/README.md` + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
 | **ui-view** | `src/App.tsx`, `src/main.tsx`, `src/ui/*.tsx` | `App.tsx`, `main.tsx`, `ui/todo-app.tsx`, `ui/todo-row.tsx`, `ui/todo-form.tsx` (5) | `spec/frontend/README.md` (whole file; Selector Contract is binding) | All 5 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. Imports the hooks + styles owned by **ui-state**. |
 | **ui-state** | `src/ui/` hooks + styles | `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/styles.css` (3) | `spec/frontend/README.md` (§ hooks, § styles, § install button) | All 3 exist. `use-todos` exposes list/create/setStatus/delete; `use-install-prompt` exposes `{ canInstall, promptInstall }`; `styles.css` has the Tailwind directives + the CSS variables the tokens resolve against. |
-| **free-port** | `scripts/free-port.mjs` | `free-port.mjs` (1) | `spec/infrastructure/README.md` § "Port reclaim" | Exists. Exports `reclaimPort(port)` returning the **exact** documented shape `{ reclaimed: number[], foreign: number[], free: boolean }` (reclaims a port held by *our own* prior run; foreign listener left untouched). Also runs as a CLI (`node scripts/free-port.mjs <port>`). This is the single owner of the `reclaimPort` contract that `serve-phone` and `smoke` both import. |
-| **serve-phone** | `scripts/serve-phone.mjs` | `serve-phone.mjs` (1) | `spec/infrastructure/README.md` | Exists. **Sole owner of port 4173** — imports `reclaimPort` from `free-port.mjs`, then reclaims 4173, builds, pre-flights, opens the tunnel, and prints exactly one QR. No other script touches 4173. Branches on the reclaim result's `free` field only (`if (!result.free) abort`), never on `foreign` truthiness. |
-| **smoke** | `scripts/smoke.mjs` | `smoke.mjs` (1) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Exists. Runs on its **own dedicated port (4273), never 4173**: imports `reclaimPort` from `free-port.mjs`, reclaims **4273** (branching on the result's `free` field only — `if (!result.free) abort`, never on `foreign` truthiness), **boots and tears down its own preview** there (spawns `vite preview --port 4273 --strictPort` directly), and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
+| **free-port** | `scripts/free-port.mjs` | `free-port.mjs` (1) | `spec/infrastructure/README.md` § "Port reclaim" | Exists. Exports `freePort(port): Promise<boolean>` — bind-probes the port first (no subprocess when already free), and only if occupied finds the listener PID(s) and tree-kills them, returning `true` once bindable. Ports are project-reserved, so there is no "ours vs foreign" fingerprinting. Also runs as a CLI (`node scripts/free-port.mjs <port>`). Single owner of the `freePort` helper that `serve-phone` and `smoke` both import. **Just write the file from the spec — do NOT spawn live test servers to self-verify; the end-of-run verify chain validates it.** |
+| **serve-phone** | `scripts/serve-phone.mjs` | `serve-phone.mjs` (1) | `spec/infrastructure/README.md` | Exists. **Sole owner of port 41730** — imports `freePort` from `free-port.mjs`, then `if (!(await freePort(41730))) abort`, builds, pre-flights, opens the tunnel, and prints exactly one QR. No other script touches 41730. |
+| **smoke** | `scripts/smoke.mjs` | `smoke.mjs` (1) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Exists. Runs on its **own dedicated port (42730), never 41730**: imports `freePort` from `free-port.mjs`, `if (!(await freePort(42730))) abort`, **boots and tears down its own preview** there (spawns `vite preview --port 42730 --strictPort` directly), and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
 | **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | `spec/frontend/README.md` § Icons | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
 | **configs** | repo root | `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (5) | `spec/infrastructure/README.md` | All 5 exist. (`package.json` is **not** here — the main agent writes it; see § "Main-agent orchestration", step 2.) |
 
@@ -367,10 +368,10 @@ helper plus 2 generated PNGs; only the helper is an agent Write.)
 The split groups (`ui-view`/`ui-state`, and `free-port`/`serve-phone`/
 `smoke`) share import edges but never a file, so they fan out with zero
 conflict risk; imports resolve at the verify step like every other
-cross-agent edge. `serve-phone` and `smoke` both import `reclaimPort`
+cross-agent edge. `serve-phone` and `smoke` both import `freePort`
 from the `free-port` agent's file — that edge resolves at verify time
-exactly like the others, and because `free-port` owns the contract's
-documented return shape, neither importer has to guess it.
+exactly like the others, and because `free-port` owns the helper,
+neither importer has to reimplement it.
 
 ### Main-agent orchestration
 
@@ -404,12 +405,12 @@ documented return shape, neither importer has to guess it.
    connect: any cross-module type mismatch surfaces here, not at
    write time.
 6. **Smoke.** Run `npm run smoke`; assert exit 0. The smoke script
-   runs entirely on its **own dedicated port (4273), never 4173**: it
-   reclaims 4273 and boots **and tears down** its own preview there
-   (reclaim → preview → puppeteer → tree-kill), so the orchestrator
+   runs entirely on its **own dedicated port (42730), never 41730**: it
+   frees 42730 and boots **and tears down** its own preview there
+   (free → preview → puppeteer → tree-kill), so the orchestrator
    does **not** start a preview for it. The old `npm run preview &`
    step is gone — that stray ampersand is what orphaned a port and
-   blocked the next run. Because smoke never touches 4173, the smoke
+   blocked the next run. Because smoke never touches 41730, the smoke
    gate and the final serve step can never contend for the deliverable
    port, and a stale smoke preview can never orphan it.
 7. **Ship.** Run `npm run serve:phone`. Its stdout carries the QR. The
@@ -447,11 +448,11 @@ records the *rules* it must satisfy but does not duplicate the block.
   "scripts": {
     "dev":         "vite",
     "build":       "vite build",
-    "preview":     "vite preview --host 0.0.0.0 --port 4173 --strictPort",
+    "preview":     "vite preview --host 0.0.0.0 --port 41730 --strictPort",
     "typecheck":   "tsc --noEmit",
     "serve:phone": "node scripts/serve-phone.mjs",
     "smoke":       "node scripts/smoke.mjs",
-    "clean":       "node scripts/free-port.mjs 4173"
+    "clean":       "node scripts/free-port.mjs 41730"
   },
   "dependencies": {
     "dexie":     "^4",
