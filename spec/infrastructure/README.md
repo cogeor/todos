@@ -218,6 +218,49 @@ bindable, `false` if something still holds it):
 4. Poll the bind-probe (≈100 ms × up to ~3 s) until the socket releases.
    Return `true` when bindable, `false` on timeout.
 
+**Canonical primitives — transcribe these two.** The bind-probe and the
+`netstat`/`lsof` parse are the bug-prone, non-obvious core (exact-port
+match across IPv4/IPv6 forms, LISTENING-only); re-deriving them is what
+makes this otherwise-tiny file slow to write. The rest of `freePort` —
+wiring probe → `pidsOnPort` → `taskkill /T /F` → re-poll, and the CLI
+wrapper — is mechanical and follows the prose above.
+
+```js
+import net from 'node:net'
+import { execSync } from 'node:child_process'
+
+// Probe: can this port be bound right now? No subprocess. The common path.
+function canBind(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer()
+    srv.once('error', () => resolve(false))
+    srv.once('listening', () => srv.close(() => resolve(true)))
+    srv.listen({ port, host: '0.0.0.0' })
+  })
+}
+
+// Listener PIDs on the EXACT port. Match the port as a number (not a
+// substring), LISTENING state only, across IPv4 (0.0.0.0:/127.0.0.1:)
+// and IPv6 ([::]:) local-address forms.
+function pidsOnPort(port) {
+  const pids = new Set()
+  if (process.platform === 'win32') {
+    let out = ''
+    try { out = execSync('netstat -ano -p TCP', { encoding: 'utf8' }) } catch { return [] }
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i)
+      if (m && Number(m[1]) === port) pids.add(Number(m[2]))
+    }
+  } else {
+    try {
+      const out = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, { encoding: 'utf8' })
+      for (const tok of out.split(/\s+/)) if (tok) pids.add(Number(tok))
+    } catch { /* no listener */ }
+  }
+  return [...pids]
+}
+```
+
 **Callers guard on the boolean.** The correct usage is:
 
 ```js
@@ -310,6 +353,42 @@ frees the port regardless).
    The intended stop is **Ctrl-C in the foreground terminal**; after
    it, no `vite`/`cloudflared`/`node` process from this run remains and
    port 41730 is free.
+
+**Canonical pre-flight (step 4) — transcribe this.** The icon-size
+matching (`sizes` is a space-separated token list, not a substring) and
+the relative-URL resolution against the manifest are the parts that are
+easy to get subtly wrong; the surrounding orchestration (build, spawn,
+capture, QR) is standard and stays prose. Throw a one-line reason; the
+caller prints `[serve:phone] pre-flight failed: <reason>`, SIGTERMs the
+preview, and exits 1 before any tunnel opens.
+
+```js
+async function preflight(base) {
+  const root = await fetch(base + '/')
+  if (!root.ok) throw new Error(`GET / -> ${root.status}`)
+  if (!/<link[^>]+rel=["']?manifest/i.test(await root.text()))
+    throw new Error('index.html has no <link rel="manifest">')
+
+  const res = await fetch(base + '/manifest.webmanifest')
+  if (!res.ok) throw new Error(`manifest -> ${res.status}`)
+  let m
+  try { m = JSON.parse(await res.text()) } catch { throw new Error('manifest is not valid JSON') }
+  if (!m.name) throw new Error('manifest.name is empty')
+  if (!m.start_url) throw new Error('manifest.start_url missing')
+  if (m.display !== 'standalone') throw new Error("manifest.display must be 'standalone'")
+
+  const icons = m.icons ?? []
+  const has = (s) => icons.some((i) => String(i.sizes || '').split(/\s+/).includes(s))
+  if (!has('192x192')) throw new Error('manifest has no 192x192 icon')
+  if (!has('512x512')) throw new Error('manifest has no 512x512 icon')
+
+  for (const icon of icons) {
+    const url = new URL(icon.src, base + '/manifest.webmanifest').href
+    const r = await fetch(url)
+    if (!r.ok) throw new Error(`icon ${icon.src} -> ${r.status}`)
+  }
+}
+```
 
    **Exit teardown is best-effort; free-on-start is the guarantee.**
    A hard kill of this process — or closing the terminal, editor, or
@@ -405,6 +484,27 @@ Behaviour:
    again (persistence held: the delete survived reload).
 10. Exit 0 if every step held; exit 1 otherwise. Any `pageerror` or
     non-`ERR_ABORTED` `requestfailed` fails the run.
+
+**Canonical step 5 — the React-controlled date input. Transcribe this.**
+A raw `el.value = …` is overwritten on React's next render, so the typed
+date never reaches state and the todo is created with the wrong (or no)
+due date — a silent smoke failure. Set via the native prototype setter,
+then dispatch the events React listens for. This is the one puppeteer
+step with a non-obvious form; every other step follows directly from the
+Selector Contract and needs no canonical block.
+
+```js
+await page.$eval(
+  'input[aria-label="Due date"]',
+  (el, value) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    set.call(el, value)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new Event('change', { bubbles: true }))
+  },
+  dueDate, // 'YYYY-MM-DD', today + 7 days
+)
+```
 
 The script is the contract between the spec and any implementer:
 "does the prototype work?" is answered by this exit code. The

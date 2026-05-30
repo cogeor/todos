@@ -431,7 +431,7 @@ neither importer has to reimplement it.
    this step to the user. **Do not declare success until the full QR is
    on screen in your reply.**
 
-**Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa.
+**Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa. Run every command from the repo root (the cloned `todos/` directory, where `package.json` lives) — not its parent — so `npm install` / `build` / `smoke` resolve the manifest without a `--prefix` and don't fire twice.
 
 #### Canonical `package.json`
 
