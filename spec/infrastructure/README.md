@@ -308,10 +308,15 @@ frees the port regardless).
    tunnel. The tunnel and pre-flight target the same port the preview
    actually bound.
 3. **Wait for localhost.** Poll `http://localhost:41730/` with `fetch`
-   until it returns 200. Time out at 30 s with a clear error. Scan the
-   preview child's stdout for the `localhost:41730` ready line; treat a
-   `Port 41730 is in use` line (or a 30 s timeout without the ready
-   line) as a pre-flight failure per step 2.
+   until it returns 200 — **the fetch is the sole readiness signal.**
+   Time out at 30 s with a clear error. Do **not** gate readiness on
+   parsing the preview's stdout: Vite prints its `Local:` line with ANSI
+   color codes (`localhost:\x1b[1m41730\x1b[22m`), so a literal
+   `localhost:41730` substring match is unreliable and has falsely failed
+   otherwise-healthy runs with a 30 s timeout. You may still watch stdout
+   for a `Port 41730 is in use` line as an early fail-fast per step 2, but
+   the *absence* of a ready line is never itself a failure — only the
+   `fetch` timeout is.
 4. **Pre-flight.** Run, against `http://localhost:41730`, in order:
    - **`GET /`** → 200, body contains `<link rel="manifest"`.
    - **`GET /manifest.webmanifest`** → 200, response is JSON, parsed
