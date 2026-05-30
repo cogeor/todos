@@ -17,9 +17,10 @@ duplicate it.
   (`vite preview --host 0.0.0.0 --port 4173 --strictPort`), `typecheck`
   (`tsc --noEmit`), `serve:phone`, `smoke`, and `clean`
   (`node scripts/free-port.mjs 4173`). `clean` is the manual
-  port-reclaim escape hatch; `serve:phone` and `smoke` also reclaim
-  4173 automatically on start (§ "Port reclaim — `free-port.mjs`"), so
-  you rarely need it by hand.
+  port-reclaim escape hatch for the deliverable port; `serve:phone`
+  reclaims 4173 automatically on start and `smoke` reclaims its own
+  port 4273 (§ "Port reclaim — `free-port.mjs`"), so you rarely need it
+  by hand.
 - **Dependencies:** pin majors, let minors and patches float. 4
   production (`dexie`, `react`, `react-dom`, `ulid`) + 11 development
   is the entire dependency surface for this product.
@@ -144,11 +145,24 @@ print. There is no second test script. If the QR prints, the install
 path is good; if any pre-flight check fails, the QR never prints and
 the implementer sees a one-line error.
 
-**Must run in the foreground.** The script's QR output is rendered to
-stdout via `qrcode-terminal`. If the main agent backgrounds the
-process or routes its stdout through a non-terminal pipe, the QR is
-not visible to the user. Run it as a foreground command, attached to
-the user's terminal, until the user terminates with Ctrl-C.
+**Surfacing the QR — the deliverable is that the *full* QR reaches the
+user.** The script renders the QR to stdout via `qrcode-terminal`; how
+the main agent gets it in front of the user depends on the runtime
+(see `spec/README.md` § "Deliverable"):
+
+- **At a human terminal:** run it in the **foreground**, attached, with
+  stdout not redirected away, until the user terminates with Ctrl-C.
+  The QR renders directly to the screen.
+- **In an agent / automation harness (no shared terminal):** the main
+  agent **captures** the script's stdout, waits for the QR and the
+  `*.trycloudflare.com` URL to appear, **reprints the complete QR block
+  (every row) and the URL verbatim** in its reply, and leaves the
+  process running so the tunnel stays up. Capturing the output is
+  required here — it is the only path by which the QR reaches the user.
+
+Either way the QR must appear **in full**. A discarded, piped-away,
+truncated, or summarized QR **has not shipped**, and the tunnel must
+stay up until the user has installed.
 
 The user-side narrative (which phone browser, install gesture) is in
 `spec/README.md` § "Phone side — what the user does beyond scanning."
@@ -159,9 +173,20 @@ material.
 ### Port reclaim — `free-port.mjs`
 
 `scripts/free-port.mjs` exports `reclaimPort(port)` and also runs as a
-CLI (`node scripts/free-port.mjs 4173`, wired to `npm run clean`). Both
-`serve-phone.mjs` and `smoke.mjs` call `reclaimPort(4173)` as their
-**first action**, before build or preview.
+CLI (`node scripts/free-port.mjs 4173`, wired to `npm run clean`).
+`reclaimPort` is a **parameterised** helper — the port is an argument,
+not a hard-coded constant — so each caller reclaims only its own port.
+
+**Port 4173 is reclaimed in exactly one place: `serve-phone.mjs`, as
+its first action.** `serve-phone.mjs` is the single install-flow
+orchestrator and is run only by the main agent as the **last** step of
+a run, so all handling of the deliverable port lives at the end of the
+run, in the one step that owns serving. `smoke.mjs` does **not** touch
+4173 at all — it runs against its own dedicated port **4273** (§ "Smoke
+test"), reclaiming `reclaimPort(4273)` as its first action. Decoupling
+the ports means the smoke gate and the final serve can never contend
+for the same port, and a stale smoke preview can never orphan the
+deliverable port.
 
 `reclaimPort(port)`:
 
@@ -176,6 +201,36 @@ CLI (`node scripts/free-port.mjs 4173`, wired to `npm run clean`). Both
    "foreign process on `<port>`" result. The caller aborts with the
    usual pre-flight message instead of killing an unrelated app.
 4. No-op and silent when the port is already free.
+
+**Return value — pinned contract.** `reclaimPort` is written by the
+`free-port` agent and imported by both `serve-phone` and `smoke`, so
+its return shape is a hard cross-agent contract, not an implementation
+detail. It returns, **exactly**:
+
+```ts
+{ reclaimed: number[], foreign: number[], free: boolean }
+```
+
+- `reclaimed` — PIDs that were ours and got killed (may be empty).
+- `foreign` — PIDs of non-ours listeners left untouched (may be empty).
+- `free` — `true` iff the port is now bindable (no listener, or only
+  ours and we killed it). This is `foreign.length === 0`.
+
+**Callers branch on `free` only.** The correct guard is:
+
+```js
+const result = await reclaimPort(PORT)
+if (!result.free) {
+  // a foreign process still holds the port — abort with the pre-flight message
+}
+```
+
+Do **not** branch on `foreign` (or `reclaimed`) for truthiness: in
+JavaScript an empty array `[]` is **truthy**, so `if (result.foreign)`
+is *always* true and aborts even when the port is free. Branching on
+the boolean `free` is the only correct test. (This exact mistake — a
+caller testing `if (result.foreign)` against a free port — is why the
+shape is pinned here rather than left for each importer to infer.)
 
 This is what makes `--strictPort` safe to keep: a stale preview from a
 prior run is reclaimed automatically, while a genuinely foreign
@@ -303,13 +358,18 @@ can be reintroduced. Until then, one script is enough.
 ## Smoke test — `scripts/smoke.mjs`
 
 The smoke test is the verification oracle for success criteria #1–#9
-in `spec/README.md`. It **owns its own preview lifecycle**: on start it
-`await reclaimPort(4173)`, spawns `npm run preview`, waits for 4173 to
-answer 200, runs the puppeteer steps below, and on exit (success,
-failure, or signal) tears the preview down with the same tree-kill as
-`serve-phone.mjs`. The orchestrator must **not** start a preview for
-it — there is no `npm run preview &` step, and that stray ampersand was
-the orphan that left 4173 busy.
+in `spec/README.md`. It **owns its own preview lifecycle on a dedicated
+port — 4273, never 4173**: on start it `await reclaimPort(4273)`,
+spawns its own preview bound to 4273 (`vite preview --host 0.0.0.0
+--port 4273 --strictPort` directly — *not* `npm run preview`, which is
+hard-wired to the deliverable port 4173), waits for 4273 to answer 200,
+runs the puppeteer steps below, and on exit (success, failure, or
+signal) tears the preview down with the same tree-kill as
+`serve-phone.mjs`. It never reclaims or binds 4173 — the deliverable
+port belongs to the final serve step alone (§ "Port reclaim"). The
+orchestrator must **not** start a preview for it — there is no
+`npm run preview &` step, and that stray ampersand was the orphan that
+left a port busy.
 
 **Selector contract.** Every selector and assertion below maps 1:1 to
 the table in `spec/frontend/README.md` § "Selector Contract." That
@@ -319,14 +379,15 @@ contract disagree, the contract wins and the script is wrong.
 
 Behaviour:
 
-0. `await reclaimPort(4173)`, then spawn `npm run preview`, poll
-   `http://localhost:4173/` until 200 (30 s timeout), and register a
-   tree-kill teardown that fires on every exit path.
+0. `await reclaimPort(4273)`, then spawn `vite preview --host 0.0.0.0
+   --port 4273 --strictPort`, poll `http://localhost:4273/` until 200
+   (30 s timeout), and register a tree-kill teardown that fires on
+   every exit path. (Port 4273, never 4173 — see § "Port reclaim".)
 1. Launch `puppeteer-core` against the system Chrome.
    Default path on Windows:
    `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`.
    Override with `CHROME_PATH`.
-2. `page.goto('http://localhost:4173')`.
+2. `page.goto('http://localhost:4273')`.
 3. Delete IndexedDB `todos-app` and reload, so each run is
    deterministic.
 4. Wait for the Add button (see Selector Contract).

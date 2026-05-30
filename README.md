@@ -53,12 +53,13 @@ Open Claude Code in this directory and tell it:
 > `spec/infrastructure`); each module agent reads its own. Do NOT read
 > any `.md` at repo root other than this one — they are not for
 > implementers. Keeping your context tight at spawn time is what lets
-> the eight agents do the real work in parallel.
+> the nine agents do the real work in parallel.
 >
-> Then follow `spec/README.md` § "Implementation Plan": eight agents
-> (the `ui` and `scripts` modules each split in two so the heaviest
-> work doesn't gate the batch), **spawn all eight in a single message**
-> with parallel Agent calls — this is REQUIRED, not optional. You are
+> Then follow `spec/README.md` § "Implementation Plan": nine agents
+> (the `ui` module splits in two and the `scripts` work splits three
+> ways so the heaviest work doesn't gate the batch), **spawn all nine
+> in a single message** with parallel Agent calls — this is REQUIRED,
+> not optional. You are
 > the orchestrator: the only file you write yourself is `package.json`
 > (the install manifest) — no source files. Each agent reads its own
 > sub-spec, writes its files, and reports back. Write `package.json`

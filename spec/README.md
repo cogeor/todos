@@ -25,10 +25,29 @@ If you find this repetitive, that is the intent.
 
 The **main agent** — the interactive coding agent the user opened in
 the repo (Claude Code or equivalent) — owns this final step. Subagents
-do not run `serve:phone`. The main agent runs it **in the foreground**
-so its stdout (which contains the QR) reaches the user's terminal.
-Backgrounding the process, redirecting its output, or wrapping it in
-a captured-output harness all defeat the deliverable.
+do not run `serve:phone`. **The main agent is responsible for making
+the complete QR visible to the user: it must render the entire QR
+block (every row, untruncated) and the `*.trycloudflare.com` URL
+beneath it in its own reply — not merely let `serve:phone`'s output
+scroll past in a tool buffer.** A truncated, summarized, or "see
+above" QR **has not shipped**. The process must also stay alive (tunnel
+up) until the user stops it.
+
+One invariant, two runtimes. The invariant: the full QR ends up in
+front of the user, and the tunnel stays up until they install.
+- **At a human terminal:** run `serve:phone` in the **foreground**,
+  attached, with stdout not redirected away, so the QR renders
+  directly to the screen. Stay attached until Ctrl-C.
+- **In an agent / automation harness (no shared terminal):** the main
+  agent **captures** `serve:phone`'s output, waits for the QR and URL
+  to appear, **reprints the entire QR block verbatim** in its reply,
+  and leaves the process running so the tunnel stays up. Capturing the
+  output is **required** here, not forbidden — it is the only way the
+  QR reaches the user.
+
+What defeats the deliverable is the QR never becoming fully visible to
+the user, a truncated QR, or the tunnel being torn down before the
+user has installed.
 
 ## Core User Story
 
@@ -66,9 +85,9 @@ unverified, you skipped the gates.
    scan and the app will load, but the "Install app" affordance
    never appears. PNG is mandatory; SVG is fine as a supplementary
    `<link rel="icon">` and apple-touch-icon.
-9. `node scripts/smoke.mjs` — which reclaims port 4173 and boots and
-   tears down its own preview server — adds, completes, and deletes a
-   todo. Exit code 0.
+9. `node scripts/smoke.mjs` — which reclaims its own dedicated port
+   4273 (never 4173) and boots and tears down its own preview server
+   there — adds, completes, and deletes a todo. Exit code 0.
 10. `npm run serve:phone` produces exactly one terminal QR and one
     `https://*.trycloudflare.com` URL underneath it. The script
     always runs `npm run build` first (never serve stale), then
@@ -280,7 +299,7 @@ blocking trycloudflare, etc.) live in the root `README.md`
 
 ## Implementation Plan
 
-The work partitions into **eight independent agents**. They
+The work partitions into **nine independent agents**. They
 **parallelize** — they run concurrently, have no execution order
 between them, and never wait on each other. Within each agent, it
 **fans out** its file writes: every file it owns is emitted in a
@@ -290,10 +309,17 @@ ordering either.
 The partition is balanced for **wall-clock**, not just for tidy
 ownership. The batch finishes only when its *slowest* agent returns,
 so the two heaviest concerns — the UI screen and the install scripts —
-are each split across **two** agents instead of letting one long agent
-gate everything. `ui` splits into a **view** agent (markup + the
-binding Selector Contract) and a **state** agent (hooks + styles);
-`scripts` splits into a **serve-phone** agent and a **smoke** agent.
+are split so that no single long agent gates everything. `ui` splits
+into a **view** agent (markup + the binding Selector Contract) and a
+**state** agent (hooks + styles). `scripts` splits **three** ways:
+`free-port` owns the shared `free-port.mjs` helper, `serve-phone` owns
+the install-flow orchestrator, and `smoke` owns the test. Carving
+`free-port` out matters twice over: it was the longest single agent's
+extra file (so splitting it shortens the long pole), and it is the one
+file *imported by two other agents* — giving the `reclaimPort` contract
+a single owner instead of leaving it implicit across `serve-phone` and
+`smoke` (see `spec/infrastructure/README.md` § "Port reclaim", which
+pins that contract's return shape).
 
 **This is a spec, not code.** TypeScript only resolves at the verify
 step at the end of the run. Until then, every agent is just files on
@@ -320,7 +346,7 @@ hard rule. A run where the main agent wrote any *source* file (anything
 beyond `package.json`) has failed the orchestration contract even if
 every gate passes and the QR prints.
 
-### The eight agents
+### The nine agents
 
 | Agent | Owns | Files | Reads | Done when |
 |---|---|---|---|---|
@@ -328,18 +354,23 @@ every gate passes and the QR prints.
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | `spec/data/README.md` + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
 | **ui-view** | `src/App.tsx`, `src/main.tsx`, `src/ui/*.tsx` | `App.tsx`, `main.tsx`, `ui/todo-app.tsx`, `ui/todo-row.tsx`, `ui/todo-form.tsx` (5) | `spec/frontend/README.md` (whole file; Selector Contract is binding) | All 5 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. Imports the hooks + styles owned by **ui-state**. |
 | **ui-state** | `src/ui/` hooks + styles | `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/styles.css` (3) | `spec/frontend/README.md` (§ hooks, § styles, § install button) | All 3 exist. `use-todos` exposes list/create/setStatus/delete; `use-install-prompt` exposes `{ canInstall, promptInstall }`; `styles.css` has the Tailwind directives + the CSS variables the tokens resolve against. |
-| **serve-phone** | `scripts/serve-phone.mjs`, `scripts/free-port.mjs` | `serve-phone.mjs`, `free-port.mjs` (2) | `spec/infrastructure/README.md` | Both exist. `free-port.mjs` exports `reclaimPort(port)` (reclaims a port held by *our own* prior run; foreign listener left untouched). `serve-phone.mjs` = reclaim + build + pre-flight + cloudflared + exactly one QR print. |
-| **smoke** | `scripts/smoke.mjs` | `smoke.mjs` (1) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Exists. Reclaims 4173, **boots and tears down its own preview**, imports `reclaimPort` from `free-port.mjs`, and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
+| **free-port** | `scripts/free-port.mjs` | `free-port.mjs` (1) | `spec/infrastructure/README.md` § "Port reclaim" | Exists. Exports `reclaimPort(port)` returning the **exact** documented shape `{ reclaimed: number[], foreign: number[], free: boolean }` (reclaims a port held by *our own* prior run; foreign listener left untouched). Also runs as a CLI (`node scripts/free-port.mjs <port>`). This is the single owner of the `reclaimPort` contract that `serve-phone` and `smoke` both import. |
+| **serve-phone** | `scripts/serve-phone.mjs` | `serve-phone.mjs` (1) | `spec/infrastructure/README.md` | Exists. **Sole owner of port 4173** — imports `reclaimPort` from `free-port.mjs`, then reclaims 4173, builds, pre-flights, opens the tunnel, and prints exactly one QR. No other script touches 4173. Branches on the reclaim result's `free` field only (`if (!result.free) abort`), never on `foreign` truthiness. |
+| **smoke** | `scripts/smoke.mjs` | `smoke.mjs` (1) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Exists. Runs on its **own dedicated port (4273), never 4173**: imports `reclaimPort` from `free-port.mjs`, reclaims **4273** (branching on the result's `free` field only — `if (!result.free) abort`, never on `foreign` truthiness), **boots and tears down its own preview** there (spawns `vite preview --port 4273 --strictPort` directly), and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
 | **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | `spec/frontend/README.md` § Icons | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
 | **configs** | repo root | `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (5) | `spec/infrastructure/README.md` | All 5 exist. (`package.json` is **not** here — the main agent writes it; see § "Main-agent orchestration", step 2.) |
 
-**Total: 28 files — 27 across the eight parallel module agents, plus
+**Total: 28 files — 27 across the nine parallel module agents, plus
 `package.json` written by the main agent.** (The icons agent writes 1
 helper plus 2 generated PNGs; only the helper is an agent Write.)
 
-The split pairs (`ui-view`/`ui-state`, `serve-phone`/`smoke`) share an
-import edge but never a file, so they fan out with zero conflict risk;
-imports resolve at the verify step like every other cross-agent edge.
+The split groups (`ui-view`/`ui-state`, and `free-port`/`serve-phone`/
+`smoke`) share import edges but never a file, so they fan out with zero
+conflict risk; imports resolve at the verify step like every other
+cross-agent edge. `serve-phone` and `smoke` both import `reclaimPort`
+from the `free-port` agent's file — that edge resolves at verify time
+exactly like the others, and because `free-port` owns the contract's
+documented return shape, neither importer has to guess it.
 
 ### Main-agent orchestration
 
@@ -362,10 +393,10 @@ imports resolve at the verify step like every other cross-agent edge.
    begins at t=0 and runs concurrently with every module agent: no
    poll, no `ENOENT` race, no dependence on harness file-watch timing.
    This is the only file the main agent writes.
-3. **Spawn the agents.** In one message, spawn all eight module agents
+3. **Spawn the agents.** In one message, spawn all nine module agents
    with parallel Agent calls. Hand each agent its row from the table
    above.
-4. **Wait** for all eight module agents and `npm install` to return.
+4. **Wait** for all nine module agents and `npm install` to return.
    With install started at step 2 it is normally already done by the
    time the agents return.
 5. **Verify — concurrent.** In one message, run `npm run typecheck`
@@ -373,21 +404,31 @@ imports resolve at the verify step like every other cross-agent edge.
    connect: any cross-module type mismatch surfaces here, not at
    write time.
 6. **Smoke.** Run `npm run smoke`; assert exit 0. The smoke script
-   reclaims port 4173 and boots **and tears down** its own preview
+   runs entirely on its **own dedicated port (4273), never 4173**: it
+   reclaims 4273 and boots **and tears down** its own preview there
    (reclaim → preview → puppeteer → tree-kill), so the orchestrator
    does **not** start a preview for it. The old `npm run preview &`
-   step is gone — that stray ampersand is what orphaned 4173 and
-   blocked the next run.
-7. **Ship.** Run `npm run serve:phone` **in the foreground.** Do not
-   background it, do not redirect its stdout, do not wrap it in a
-   harness that captures output. The script's stdout *is* the QR;
-   backgrounding it means the QR never reaches the user's terminal.
-   The main agent stays attached to the script until the user
-   terminates it with Ctrl-C. The main agent launches `serve:phone`
-   itself and surfaces the printed QR; it does **not** hand this step
-   to the user. The process stays running (tunnel up) until the user
-   terminates it. **Do not declare success until the QR is on screen.**
-   See § "Deliverable".
+   step is gone — that stray ampersand is what orphaned a port and
+   blocked the next run. Because smoke never touches 4173, the smoke
+   gate and the final serve step can never contend for the deliverable
+   port, and a stale smoke preview can never orphan it.
+7. **Ship.** Run `npm run serve:phone`. Its stdout carries the QR. The
+   main agent must get the **complete** QR in front of the user and
+   keep the tunnel up — see § "Deliverable" for the invariant and the
+   two runtime modes:
+   - **At a human terminal:** run it in the **foreground**, attached,
+     stdout not redirected, and stay attached until Ctrl-C.
+   - **In an agent harness (no shared TTY):** start it, watch its
+     output until the `*.trycloudflare.com` URL and QR block appear,
+     then **reprint the entire QR block (all rows) and the URL verbatim
+     in your reply**, and leave the process running so the tunnel stays
+     up.
+
+   Either way: never tear the process down before the user has
+   installed, and never show a partial or truncated QR. The main agent
+   launches `serve:phone` itself and shows the QR; it does **not** hand
+   this step to the user. **Do not declare success until the full QR is
+   on screen in your reply.**
 
 **Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa.
 
