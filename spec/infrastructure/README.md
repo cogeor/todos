@@ -13,10 +13,16 @@
     "preview":     "vite preview --host 0.0.0.0 --port 4173 --strictPort",
     "typecheck":   "tsc --noEmit",
     "serve:phone": "node scripts/serve-phone.mjs",
-    "smoke":       "node scripts/smoke.mjs"
+    "smoke":       "node scripts/smoke.mjs",
+    "clean":       "node scripts/free-port.mjs 4173"
   }
 }
 ```
+
+`clean` frees port 4173 if a previous `serve:phone` / `smoke` left an
+orphan behind. It is the manual escape hatch; `serve:phone` and
+`smoke` also reclaim the port automatically on start (see § "Port
+reclaim — `free-port.mjs`"), so you rarely need to run it by hand.
 
 No `prebuild`. The PNG icons are not generated at build time — they
 are emitted by the `icons` agent's helper (`public/icons/make-icons.mjs`,
@@ -162,8 +168,9 @@ above resolve to whichever side of the media query is active.
 
 ## Install flow — `serve:phone`
 
-`scripts/serve-phone.mjs` is the **only** install-flow artefact. It
-contains the orchestration, the pre-flight validation, and the QR
+`scripts/serve-phone.mjs` is the **only** install-flow orchestrator
+(it may import the shared `reclaimPort` helper from `free-port.mjs`).
+It contains the orchestration, the pre-flight validation, and the QR
 print. There is no second test script. If the QR prints, the install
 path is good; if any pre-flight check fails, the QR never prints and
 the implementer sees a one-line error.
@@ -180,8 +187,43 @@ Operator-facing troubleshooting (tunnel caveats, Wi-Fi blocks, etc.)
 is in the root `README.md` § "Troubleshooting" and is not spec
 material.
 
+### Port reclaim — `free-port.mjs`
+
+`scripts/free-port.mjs` exports `reclaimPort(port)` and also runs as a
+CLI (`node scripts/free-port.mjs 4173`, wired to `npm run clean`). Both
+`serve-phone.mjs` and `smoke.mjs` call `reclaimPort(4173)` as their
+**first action**, before build or preview.
+
+`reclaimPort(port)`:
+
+1. Finds the PID(s) listening on `port`. Windows: parse `netstat -ano`
+   (or `Get-NetTCPConnection`); POSIX: `lsof -ti tcp:<port>` (fall back
+   to `fuser -k <port>/tcp`).
+2. For each PID, inspects its command line. If it is **ours** — a
+   `vite preview`, a `cloudflared` tunnel, or a `node` process running
+   under this project path — kill the whole **tree** (`taskkill /pid
+   <pid> /T /F` on Windows; process-group `kill` on POSIX).
+3. If the listener is **not** ours, leave it untouched and return a
+   "foreign process on `<port>`" result. The caller aborts with the
+   usual pre-flight message instead of killing an unrelated app.
+4. No-op and silent when the port is already free.
+
+This is what makes `--strictPort` safe to keep: a stale preview from a
+prior run is reclaimed automatically, while a genuinely foreign
+process on 4173 still produces the clear hard error. **Reclaim-on-start,
+not teardown-on-exit, is the durable fix** — it does not depend on the
+previous run having shut down cleanly (a hard kill, a closed terminal,
+or a closed editor / agent session all skip exit teardown; the next
+run reclaims regardless).
+
 ### Behaviour
 
+0. **Reclaim the port.** Before anything else, `await
+   reclaimPort(4173)` (§ "Port reclaim"). After this, 4173 is either
+   free or held by a foreign process; in the latter case abort
+   immediately with `[serve:phone] pre-flight failed: port 4173 is
+   occupied by another process — stop it and retry` and never build or
+   open the tunnel.
 1. **Build.** Always run `npm run build` as a subprocess and wait
    for exit 0 before continuing. Stream its output. If build fails,
    exit non-zero with the build's exit code and a one-line hint. The
@@ -190,9 +232,10 @@ material.
 2. **Boot preview.** `spawn('npm', ['run', 'preview'])` (the project's
    own preview script, so port/host stay consistent). The preview
    script runs `vite preview --port 4173 --strictPort` so an occupied
-   port is a hard error instead of a silent bump to 4174. Watch the
-   preview child's stdout; if it emits `Port 4173 is in use` (or never
-   reports listening on 4173 within the timeout), abort with
+   port is a hard error instead of a silent bump to 4174. Step 0
+   already reclaimed any orphan of *ours*, so if the preview child
+   still emits `Port 4173 is in use` (or never reports listening on
+   4173 within the timeout), the occupant is foreign; abort with
    `[serve:phone] pre-flight failed: port 4173 is occupied by another
    process — stop it and retry` and never open the tunnel. The tunnel
    and pre-flight target the same port the preview actually bound.
@@ -244,9 +287,17 @@ material.
 
    The intended stop is **Ctrl-C in the foreground terminal**; after
    it, no `vite`/`cloudflared`/`node` process from this run remains and
-   ports 4173/4174 are free. A run that leaves an orphan holding 4173
-   is a teardown failure — it silently breaks the *next* `serve:phone`
-   (it is the trigger for the wrong-port bug in step 2).
+   ports 4173/4174 are free.
+
+   **Exit teardown is best-effort; reclaim-on-start is the guarantee.**
+   A hard kill of this process — or closing the terminal, editor, or
+   agent session that owns it — skips these handlers, and on Windows
+   the `vite`/`cloudflared` grandchildren are not in a kill-on-close
+   job, so they can survive as orphans holding 4173. That is tolerated:
+   step 0's `reclaimPort` clears them on the next run before binding.
+   Do **not** rely on exit teardown alone to keep successive runs
+   unblocked — that is exactly the assumption that left the port busy
+   before.
 
 The script must work on Windows (PowerShell), macOS, and Linux. Use
 `shell: true` when spawning `npm run preview` and `npm run build` so
@@ -283,7 +334,13 @@ can be reintroduced. Until then, one script is enough.
 ## Smoke test — `scripts/smoke.mjs`
 
 The smoke test is the verification oracle for success criteria #1–#9
-in `spec/README.md`. Run it against a running preview server.
+in `spec/README.md`. It **owns its own preview lifecycle**: on start it
+`await reclaimPort(4173)`, spawns `npm run preview`, waits for 4173 to
+answer 200, runs the puppeteer steps below, and on exit (success,
+failure, or signal) tears the preview down with the same tree-kill as
+`serve-phone.mjs`. The orchestrator must **not** start a preview for
+it — there is no `npm run preview &` step, and that stray ampersand was
+the orphan that left 4173 busy.
 
 **Selector contract.** Every selector and assertion below maps 1:1 to
 the table in `spec/frontend/README.md` § "Selector Contract." That
@@ -293,6 +350,9 @@ contract disagree, the contract wins and the script is wrong.
 
 Behaviour:
 
+0. `await reclaimPort(4173)`, then spawn `npm run preview`, poll
+   `http://localhost:4173/` until 200 (30 s timeout), and register a
+   tree-kill teardown that fires on every exit path.
 1. Launch `puppeteer-core` against the system Chrome.
    Default path on Windows:
    `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`.
@@ -328,7 +388,7 @@ selectors above are exact and must match `spec/frontend/README.md`
 |---|---|---|
 | Types | `npm run typecheck` | Must pass |
 | Build | `npm run build` | Must pass |
-| Smoke | `npm run smoke` (after `npm run preview &`) | Must pass |
+| Smoke | `npm run smoke` (boots and tears down its own preview) | Must pass |
 | Install flow | `npm run serve:phone` prints a QR | Must pass |
 | Bundle size | check `dist/` | < 250 KB gzipped JS |
 | Lighthouse PWA | manual, Chrome DevTools | "Installable" — PNG icons present, SW registered, manifest valid. If Lighthouse marks the site "Not installable" the manifest icons are almost certainly still SVG; check `dist/icons/*.png`. |
@@ -353,12 +413,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run preview &
-      - run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:4173 && break || sleep 1
-          done
-      - run: npm run smoke
+      - run: npm run smoke   # boots and tears down its own preview
 ```
 
 ## Boundary Rules

@@ -66,8 +66,9 @@ unverified, you skipped the gates.
    scan and the app will load, but the "Install app" affordance
    never appears. PNG is mandatory; SVG is fine as a supplementary
    `<link rel="icon">` and apple-touch-icon.
-9. `node scripts/smoke.mjs` against the running preview server adds,
-   completes, and deletes a todo. Exit code 0.
+9. `node scripts/smoke.mjs` — which reclaims port 4173 and boots and
+   tears down its own preview server — adds, completes, and deletes a
+   todo. Exit code 0.
 10. `npm run serve:phone` produces exactly one terminal QR and one
     `https://*.trycloudflare.com` URL underneath it. The script
     always runs `npm run build` first (never serve stale), then
@@ -308,11 +309,11 @@ the QR prints.
 | **domain** | `src/domain/` | `errors.ts`, `ids.ts`, `types.ts`, `rules.ts`, `index.ts` (5) | `spec/domain/README.md` | All 5 exist. Barrel re-exports the other four. Zero DOM / React / Dexie imports. |
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | `spec/data/README.md` + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
 | **ui** | `src/App.tsx`, `src/main.tsx`, `src/ui/` | `App.tsx`, `main.tsx`, `ui/styles.css`, `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/todo-row.tsx`, `ui/todo-form.tsx`, `ui/todo-app.tsx` (8) | `spec/frontend/README.md` (whole file; Selector Contract is binding) | All 8 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. |
-| **scripts** | `scripts/` | `serve-phone.mjs`, `smoke.mjs` (2) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | Both exist. `serve-phone.mjs` = build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
+| **scripts** | `scripts/` | `serve-phone.mjs`, `smoke.mjs`, `free-port.mjs` (3) | `spec/infrastructure/README.md`, `spec/frontend/README.md` § Selector Contract | All three exist. `free-port.mjs` exports `reclaimPort(port)` (reclaims a port held by *our own* prior run; foreign listener left untouched). `serve-phone.mjs` = reclaim + build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` reclaims, **boots and tears down its own preview**, and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
 | **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | `spec/frontend/README.md` § Icons | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
 | **configs** | repo root | `package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (6) | `spec/README.md`, `spec/infrastructure/README.md` | All 6 exist. `package.json` dependency list matches the infrastructure spec exactly. |
 
-**Total: 26 files across 6 parallel agents.** (The icons module
+**Total: 27 files across 6 parallel agents.** (The icons module
 writes 1 helper plus 2 generated PNGs; only the helper is an agent
 Write.)
 
@@ -342,8 +343,12 @@ Write.)
    and `npm run build`. Both must pass. This is where the modules
    connect: any cross-module type mismatch surfaces here, not at
    write time.
-6. **Smoke.** Boot `npm run preview` in the background; run
-   `npm run smoke`; assert exit 0.
+6. **Smoke.** Run `npm run smoke`; assert exit 0. The smoke script
+   reclaims port 4173 and boots **and tears down** its own preview
+   (reclaim → preview → puppeteer → tree-kill), so the orchestrator
+   does **not** start a preview for it. The old `npm run preview &`
+   step is gone — that stray ampersand is what orphaned 4173 and
+   blocked the next run.
 7. **Ship.** Run `npm run serve:phone` **in the foreground.** Do not
    background it, do not redirect its stdout, do not wrap it in a
    harness that captures output. The script's stdout *is* the QR;
@@ -354,6 +359,8 @@ Write.)
    to the user. The process stays running (tunnel up) until the user
    terminates it. **Do not declare success until the QR is on screen.**
    See § "Deliverable".
+
+**Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa.
 
 ## MVP Cut
 
